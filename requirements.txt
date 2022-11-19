@@ -2,3 +2,6 @@ scikit-learn
 ipykernel
 numpy
 matplotlib
+tensorflow-gpu
+tensorrt
+nvitop
