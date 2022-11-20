@@ -5,3 +5,5 @@ matplotlib
 tensorflow-gpu
 tensorrt
 nvitop
+pandas
+autopep8
