@@ -7,3 +7,4 @@ tensorrt
 nvitop
 pandas
 autopep8
+pandas-stubs
