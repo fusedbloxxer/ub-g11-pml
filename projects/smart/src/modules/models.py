@@ -148,16 +148,20 @@ class SVMModel(Model[SVMParams]):
 
     def fit(self, train_data: ny.ndarray, train_labels: ny.ndarray,
                   valid_data: ny.ndarray = None, valid_labels: ny.ndarray = None) -> HistoryProgress:
+        # Test if validation data was passed in
+        has_valid = valid_data is not None and valid_labels is not None
+
         # Train the model on the available data
         self.model_.fit(train_data, train_labels)
-        
-        
-        # if valid_data is not None and valid_labels is not None:
 
+        # Compute the accuracy over train & valid data
+        t_acc = self.model_.score(train_data, train_labels)
+        v_acc = self.model_.score(valid_data, valid_labels) if has_valid else None
+        return TrainValidHistoryProgress(t_acc, v_acc)
 
     def predict(self, data: ny.ndarray) -> ny.ndarray:
         """Predict an array of labels for the given data."""
-        raise NotImplementedError()
+        return self.model_.predict(data)
 
 
 class TCNNModel(Model[TCNNParams]):
