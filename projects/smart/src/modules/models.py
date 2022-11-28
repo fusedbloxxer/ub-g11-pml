@@ -3,10 +3,12 @@ from typing import TypedDict, TypeVar, Callable, Generic, List, Any, Tuple
 import abc
 import pathlib as pb
 from sklearn.svm import SVC
+from sklearn.neighbors import KNeighborsClassifier
 from nvitop.callbacks.keras import GpuStatsLogger
 from sklearn.metrics import confusion_matrix
 from matplotlib import pyplot as pt
 import numpy as ny
+import sklearn as sn
 import tensorflow as tw
 
 
@@ -34,6 +36,11 @@ class SVMParams(HyperParams):
     C: float
     kernel: str
     gamma: str
+
+
+class KNNParams(HyperParams):
+    n_neighbors: int
+    p: int
 
 
 class HistoryProgress(abc.ABC):
@@ -137,14 +144,17 @@ class Model(abc.ABC, Generic[HP]):
         labels_p = self.predict(data)
         return confusion_matrix(labels_t, labels_p)
 
+TSKModel = TypeVar('TSKModel', bound=sn.base.ClassifierMixin |
+                                     sn.base.BaseEstimator)
 
-class SVMModel(Model[SVMParams]):
-    def __init__(self, hparams: SVMParams):
-        super().__init__(hparams)
+class SKModel(Model[HP], Generic[HP, TSKModel]):
+    model_: TSKModel
 
-        # Instantiate the model
-        self.model_ = SVC(C=hparams['C'], kernel=hparams['kernel'],
-                          gamma=hparams['gamma'])
+    def __init__(self, hparams: HP, model: TSKModel):
+        super().__init__(hparams=hparams)
+
+        # Retrieve the model
+        self.model_ = model
 
     def fit(self, train_data: ny.ndarray, train_labels: ny.ndarray,
                   valid_data: ny.ndarray = None, valid_labels: ny.ndarray = None) -> HistoryProgress:
@@ -162,6 +172,22 @@ class SVMModel(Model[SVMParams]):
     def predict(self, data: ny.ndarray) -> ny.ndarray:
         """Predict an array of labels for the given data."""
         return self.model_.predict(data)
+
+
+class SVMModel(SKModel[SVMParams, SVC]):
+    def __init__(self, hparams: SVMParams, verbose: bool = True):
+        super().__init__(hparams=hparams, model=SVC(C=hparams['C'],
+                                                    kernel=hparams['kernel'],
+                                                    gamma=hparams['gamma'],
+                                                    verbose=verbose))
+
+
+class KNNModel(SKModel[KNNParams, KNeighborsClassifier]):
+    def __init__(self, hparams: KNNParams):
+        super().__init__(hparams=hparams, model=KNeighborsClassifier(
+            n_neighbors=hparams['n_neighbors'],
+            p=hparams['p'],
+        ))
 
 
 class TCNNModel(Model[TCNNParams]):
