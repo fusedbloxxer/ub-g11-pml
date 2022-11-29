@@ -2,6 +2,7 @@ from __future__ import annotations
 from typing import TypedDict, TypeVar, Callable, Generic, List, Any, Tuple
 import abc
 import pathlib as pb
+from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.svm import SVC
 from sklearn.neighbors import KNeighborsClassifier
 from nvitop.callbacks.keras import GpuStatsLogger
@@ -41,6 +42,13 @@ class SVMParams(HyperParams):
 class KNNParams(HyperParams):
     n_neighbors: int
     p: int
+
+
+class BoostedTreesParams(HyperParams):
+    learning_rate: float
+    n_estimators: int
+    subsample: float
+    max_depth: int
 
 
 class HistoryProgress(abc.ABC):
@@ -172,6 +180,17 @@ class SKModel(Model[HP], Generic[HP, TSKModel]):
     def predict(self, data: ny.ndarray) -> ny.ndarray:
         """Predict an array of labels for the given data."""
         return self.model_.predict(data)
+
+
+class BoostedTreesModel(SKModel[BoostedTreesParams, GradientBoostingClassifier]):
+    def __init__(self, hparams: BoostedTreesParams, verbose: int = 0):
+        super().__init__(hparams, GradientBoostingClassifier(
+            learning_rate=hparams['learning_rate'],
+            n_estimators=hparams['n_estimators'],
+            subsample=hparams['subsample'],
+            max_depth=hparams['max_depth'],
+            verbose=verbose,
+        ))
 
 
 class SVMModel(SKModel[SVMParams, SVC]):
