@@ -19,6 +19,14 @@ class Dataset(object):
         self.test_data = self.test_data.reshape(shape)
         return self
 
+    def preprocess(self, rounding: Optional[int]=3) -> Dataset:
+        """Preprocess the training and testing sets. Operations applied:
+            - round each coordinate to a digit specified in `rounding` param."""
+        if rounding is not None:
+            self.train_data = ny.round(self.train_data, decimals=rounding)
+            self.test_data = ny.round(self.test_data, decimals=rounding)
+        return self
+
     def fill_gaps(self, n_size: int = 150, min_limit: Optional[int] = 75) -> Dataset:
         """Fill in interpolated elements in-between existing ones."""
         self.train_data, deleted_i = Dataset.fill_missing_values(self.train_data, n_size, min_limit)
