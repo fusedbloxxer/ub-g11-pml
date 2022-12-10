@@ -1,0 +1,3 @@
+mnist/train/
+mnist/test/
+mnist/val/
