@@ -1,0 +1,28 @@
+[tool.poetry]
+name = "smart"
+version = "0.1.0"
+description = ""
+authors = ["fusedbloxxer <voidwarden@yahoo.com>"]
+license = "MIT"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = ">=3.10,<3.11"
+scikit-learn = "^1.2.0"
+ipykernel = "^6.19.4"
+numpy = "^1.24.0"
+matplotlib = "^3.6.2"
+tensorflow-gpu = "^2.11.0"
+tensorrt = "^8.5.2.2"
+nvitop = "^0.11.0"
+pandas = "^1.5.2"
+autopep8 = "^2.0.1"
+pandas-stubs = "^1.5.2.221213"
+torch = "^1.13.1"
+torchvision = "^0.14.1"
+torchaudio = "^0.13.1"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
