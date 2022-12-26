@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import TypedDict, TypeVar, Callable, Generic, List, Any, Tuple
+from typing import TypedDict, TypeVar, Callable, Generic, List, Any, Tuple, Type, Iterator
 import abc
 import pathlib as pb
 from sklearn.ensemble import GradientBoostingClassifier
@@ -11,6 +11,12 @@ from matplotlib import pyplot as pt
 import numpy as ny
 import sklearn as sn
 import tensorflow as tw
+from .blocks import TemporalAttentionNN, SmartDataset
+import torch.utils.data as data
+from torch.utils.data import DataLoader, Dataset
+import torch.nn as nn
+from torch.optim import optimizer
+import torch
 
 
 class HyperParams(TypedDict):
@@ -27,10 +33,27 @@ class TCNNParams(HyperParams):
     activ_fn: tw.keras.layers.Activation
     lr_update: Tuple[int, int, float]
     n_filters: int
+    s_filters: int
     dropout: float
     n_units: int
     n_batch: int
     n_epochs: int
+
+
+class AttentionTCNNParams(HyperParams): # TODO: add custom init
+    optim: Callable[[Iterator[torch.nn.Parameter]], optimizer.Optimizer]
+    sch_lr: Callable[[optimizer.Optimizer], torch.optim.lr_scheduler._LRScheduler]
+    init_fn: Callable[[torch.Tensor], None]
+    activ_fn: Type[nn.Module]
+    bottleneck: int
+    dropout: float
+    n_filters: int
+    s_filters: int
+    n_epochs: int
+    n_units: int
+    n_batch: int
+    norm: bool
+    bias: bool
 
 
 class SVMParams(HyperParams):
@@ -66,6 +89,7 @@ class HistoryProgress(abc.ABC):
         """Display the last train and/or valid accuracy value."""
         raise NotImplementedError()
 
+
 class TrainValidHistoryProgress(HistoryProgress):
     def __init__(self, train_accuracy, valid_accuracy = None):
         super().__init__()
@@ -82,6 +106,7 @@ class TrainValidHistoryProgress(HistoryProgress):
     def accuracy(self):
         """Display the last train and/or valid accuracy value."""
         return self.train_accuracy, self.valid_accuracy
+
 
 class NNHistoryProgress(HistoryProgress):
     def __init__(self, history: Any):
@@ -112,6 +137,42 @@ class NNHistoryProgress(HistoryProgress):
                self.history['val_categorical_accuracy'][-1] if self.has_valid else None
 
 
+class TorchHistoryProgress(HistoryProgress):
+    def __init__(self, history: Tuple[torch.Tensor, ...]):
+        super().__init__()
+
+        self.history = {
+            'train_loss': history[0],
+            'train_accuracy': history[1],
+        }
+
+        if len(history) == 3:
+            self.history['valid_accuracy'] = history[2]
+            self.has_valid = True
+        else:
+            self.has_valid = False
+
+    def show(self) -> None:
+        """Show a plot containing the loss and accuracy for training and/or validation."""
+        f, ax = pt.subplots(1, 2, figsize=(10, 5))
+        f.tight_layout()
+        for i, metric in enumerate(('train_accuracy', 'train_loss')):
+            ax[i].grid(True)
+            ax[i].set_xlabel('Epoch')
+            ax[i].set_ylabel(metric.split('_')[1].capitalize())
+            ax[i].plot(ny.arange(len(self.history[metric])), self.history[metric], label='train')
+        if self.has_valid:
+            ax[0].plot(ny.arange(len(self.history['valid_accuracy'])), self.history['valid_accuracy'], label='valid')
+            ax[0].legend()
+        pt.show()
+
+    @property
+    def accuracy(self):
+        """Return the last train and/or valid accuracy value."""
+        return self.history['train_accuracy'][-1], \
+               self.history['valid_accuracy'][-1] if self.has_valid else None
+
+
 HP = TypeVar('HP', bound=HyperParams)
 
 
@@ -129,9 +190,9 @@ class Model(abc.ABC, Generic[HP]):
         or at the end, on the validation set.
         Args:
             train_data: (n_samples, n_features)
-            train_labels: (n_samples, 1)
+            train_labels: (n_samples,)
             valid_data: (n_samples, n_features)
-            valid_labels: (n_samples, 1)
+            valid_labels: (n_samples,)
         Returns: A history object containing statistics obtained throughout the training
         and validation.
         """
@@ -363,3 +424,105 @@ class TCNNModel(Model[TCNNParams]):
           self.gpu_utiliz_callback(),
           self.lr_updater_callback()
         ]
+
+
+class AttentionTCNN(Model[AttentionTCNNParams]):
+    def __init__(self, hparams: AttentionTCNNParams, device: torch.device, verbose: bool = True):
+        super().__init__(hparams)
+
+        # Parameterize the training process
+        self.n_workers = 0
+        self.n_prefetch = 2
+        self.device = device
+        self.verbose = verbose
+
+        # Parameterize the model
+        self.in_chan = 3
+        self.out_chan = 20
+        self.loss_fn = nn.CrossEntropyLoss()
+
+        # Create the network and send it to the provided device to enhance speed
+        self.model_ = TemporalAttentionNN(self.in_chan, self.out_chan,
+                                          bottleneck=hparams['bottleneck'],
+                                          s_filters=hparams['s_filters'],
+                                          n_filters=hparams['n_filters'],
+                                          init_fn=hparams['init_fn'],
+                                          activ_fn=hparams['activ_fn'],
+                                          n_units=hparams['n_units'],
+                                          dropout=hparams['dropout'],
+                                          norm=hparams['norm'],
+                                          bias=hparams['bias'],
+                                          device=device,
+                                          verbose=verbose).to(self.device)
+
+    def fit(self, train_data: ny.ndarray, train_labels: ny.ndarray,
+                  valid_data: ny.ndarray = None, valid_labels: ny.ndarray = None) -> HistoryProgress:
+        # Prepare data for processing
+        train_loader, \
+        valid_loader = self.__get_loaders(train_data, train_labels, \
+                                          valid_data, valid_labels)
+
+        # Instantiate the optimizer using the model's params
+        opt = self.hparams['optim'](self.model_.parameters())
+
+        # Optionally use a scheduler to improve the stability & convergence of the training
+        if 'sch_lr' in self.hparams and self.hparams['sch_lr'] is not None:
+            sch = self.hparams['sch_lr'](opt, self.verbose)
+        else:
+            sch = None
+
+        # Train the network and evaluate it over each epoch
+        history = self.model_.fit(train_loader, valid_loader,
+                                  loss_fn=self.loss_fn,
+                                  optim=opt,
+                                  scheduler=sch,
+                                  n_epochs=self.hparams['n_epochs'])
+
+        # Expose the history of the training (and validation)
+        return TorchHistoryProgress(history)
+
+    def predict(self, data: ny.ndarray) -> ny.ndarray:
+        loader = self.__get_loader(data, shuffle=False)
+        y_hat = self.model_.predict(loader, with_labels=False)
+        return y_hat
+
+    def __get_loaders(self, train_data: ny.ndarray, train_labels: ny.ndarray,
+                      valid_data: ny.ndarray = None, valid_labels: ny.ndarray = None) -> Tuple[data.DataLoader, data.DataLoader]:
+        """Create and return data.DataLoader for the training data and validation if
+        it's not None. The data is batched and the following operations are applied:
+            - labels are mapped from [1, C] to [0, C - 1]
+            - the data is reshaped from (N, F) to (N, C, T)
+
+        Args:
+            train_data (ny.ndarray): The training data to fit on later.
+            train_labels (ny.ndarray): The training labels used for supervision.
+            valid_data (ny.ndarray, optional): The validation data to evaluate the model. Defaults to None.
+            valid_labels (ny.ndarray, optional): The validation labels to evaluate the model. Defaults to None.
+
+        Returns:
+            Tuple[data.DataLoader, data.DataLoader]: The training loader
+            and the validation one if the provided data is not None, otherwise it's None.
+        """
+        train_loader = self.__get_loader(train_data, train_labels)
+        valid_loader = self.__get_loader(valid_data, valid_labels) \
+                       if valid_data is not None and valid_labels is not None else None
+        return train_loader, valid_loader
+
+    def __get_loader(self, data: ny.ndarray, labels: ny.ndarray | None = None, shuffle: bool = True) -> data.DataLoader:
+        """Create and return a single dta.DataLoader. The data is batched and
+        the following operations are applied:
+            - labels are mapped from [1, C] to [0, C - 1]
+            - the data is reshaped from (N, F) to (N, C, T)
+
+        Args:
+            data (ny.ndarray): The data to be provided to the model.
+            labels (ny.ndarray): The labels used for supervision.
+
+        Returns:
+            data.DataLoader: A loader that gives back a mini-batch of paired input data and labels.
+        """
+        dataset = SmartDataset(data, labels)
+        loader = DataLoader(dataset, batch_size=self.hparams['n_batch'],
+                            shuffle=shuffle, num_workers=self.n_workers,
+                            pin_memory=True, prefetch_factor=self.n_prefetch)
+        return loader
