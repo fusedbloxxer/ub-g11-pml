@@ -146,11 +146,10 @@ class TorchHistoryProgress(HistoryProgress):
             'train_accuracy': history[1],
         }
 
-        if len(history) == 3:
+        if len(history) >= 3:
             self.history['valid_accuracy'] = history[2]
-            self.has_valid = True
-        else:
-            self.has_valid = False
+        if len(history) >= 4:
+            self.history['valid_loss'] = history[3]
 
     def show(self) -> None:
         """Show a plot containing the loss and accuracy for training and/or validation."""
@@ -161,16 +160,24 @@ class TorchHistoryProgress(HistoryProgress):
             ax[i].set_xlabel('Epoch')
             ax[i].set_ylabel(metric.split('_')[1].capitalize())
             ax[i].plot(ny.arange(len(self.history[metric])), self.history[metric], label='train')
-        if self.has_valid:
-            ax[0].plot(ny.arange(len(self.history['valid_accuracy'])), self.history['valid_accuracy'], label='valid')
-            ax[0].legend()
+        for i, metric in enumerate(('valid_accuracy', 'valid_loss')):
+            if not (metric in self.history):
+                continue
+            ax[i].plot(ny.arange(len(self.history[metric])), self.history[metric], label='valid')
+            ax[i].legend()
         pt.show()
 
     @property
     def accuracy(self):
         """Return the last train and/or valid accuracy value."""
         return self.history['train_accuracy'][-1], \
-               self.history['valid_accuracy'][-1] if self.has_valid else None
+               self.history['valid_accuracy'][-1] if 'valid_accuracy' in self.history else None
+
+    @property
+    def loss(self):
+        """Return the last train and/or valid loss value."""
+        return self.history['train_loss'][-1], \
+               self.history['valid_loss'][-1] if 'valid_loss' in self.history else None
 
 
 HP = TypeVar('HP', bound=HyperParams)
@@ -437,9 +444,9 @@ class AttentionTCNN(Model[AttentionTCNNParams]):
         self.verbose = verbose
 
         # Parameterize the model
-        self.in_chan = 3
+        self.in_chan = 1
         self.out_chan = 20
-        self.loss_fn = nn.CrossEntropyLoss()
+        self.loss_fn = nn.CrossEntropyLoss(reduction='none')
 
         # Create the network and send it to the provided device to enhance speed
         self.model_ = TemporalAttentionNN(self.in_chan, self.out_chan,
