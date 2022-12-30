@@ -1,189 +1,29 @@
 from __future__ import annotations
-from typing import TypedDict, TypeVar, Callable, Generic, List, Any, Tuple, Type, Iterator
+from typing import TypeVar, Callable, Generic, List, Any, Tuple
 import abc
 import pathlib as pb
-from sklearn.ensemble import GradientBoostingClassifier
-from sklearn.svm import SVC
-from sklearn.neighbors import KNeighborsClassifier
 from nvitop.callbacks.keras import GpuStatsLogger
-from sklearn.metrics import confusion_matrix
-from matplotlib import pyplot as pt
-import numpy as ny
-import sklearn as sn
-import tensorflow as tw
-from .blocks import TemporalAttentionNN, SmartDataset
-import torch.utils.data as data
-from torch.utils.data import DataLoader, Dataset
 import torch.nn as nn
-from torch.optim import optimizer
 import torch
+import tensorflow as tw
+from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.metrics import confusion_matrix
+from sklearn.svm import SVC
+import sklearn as sn
+import numpy as ny
+from .processing import get_loader, get_loaders
+from .progress import HistoryProgress, NNHistoryProgress, TorchHistoryProgress, TrainValidHistoryProgress
+from .params import AutoEncoderParams, KNNParams, SVMParams, BoostedTreesParams
+from .params import TCNNParams, AttentionTCNNParams
+from .blocks import AutoEncoder, TemporalAttentionNN
 
 
-class HyperParams(TypedDict):
-    pass
-
-
-class TrainParams(TypedDict):
-    n_folds: int
-
-
-class TCNNParams(HyperParams):
-    optim: Callable[[], tw.keras.optimizers.Optimizer]
-    m_init: tw.keras.initializers.VarianceScaling
-    activ_fn: tw.keras.layers.Activation
-    lr_update: Tuple[int, int, float]
-    n_filters: int
-    s_filters: int
-    dropout: float
-    n_units: int
-    n_batch: int
-    n_epochs: int
-
-
-class AttentionTCNNParams(HyperParams): # TODO: add custom init
-    optim: Callable[[Iterator[torch.nn.Parameter]], optimizer.Optimizer]
-    sch_lr: Callable[[optimizer.Optimizer], torch.optim.lr_scheduler._LRScheduler]
-    init_fn: Callable[[torch.Tensor], None]
-    activ_fn: Type[nn.Module]
-    bottleneck: int
-    dropout: float
-    n_filters: int
-    s_filters: int
-    n_epochs: int
-    n_units: int
-    n_batch: int
-    norm: bool
-    bias: bool
-
-
-class SVMParams(HyperParams):
-    C: float
-    kernel: str
-    gamma: str
-
-
-class KNNParams(HyperParams):
-    n_neighbors: int
-    p: int
-
-
-class BoostedTreesParams(HyperParams):
-    learning_rate: float
-    n_estimators: int
-    subsample: float
-    max_depth: int
-
-
-class HistoryProgress(abc.ABC):
-    def __init__(self):
-        pass
-
-    @abc.abstractmethod
-    def show(self) -> None:
-        """Display to the user various statistics."""
-        raise NotImplementedError()
-
-    @property
-    @abc.abstractmethod
-    def accuracy(self):
-        """Display the last train and/or valid accuracy value."""
-        raise NotImplementedError()
-
-
-class TrainValidHistoryProgress(HistoryProgress):
-    def __init__(self, train_accuracy, valid_accuracy = None):
-        super().__init__()
-        self.train_accuracy = train_accuracy
-        self.valid_accuracy = valid_accuracy
-
-    def show(self) -> None:
-        """Display to the user various statistics."""
-        print(f'Train Accuracy: {self.train_accuracy}')
-        if self.valid_accuracy:
-          print(f'Valid Accuracy: {self.valid_accuracy}')
-
-    @property
-    def accuracy(self):
-        """Display the last train and/or valid accuracy value."""
-        return self.train_accuracy, self.valid_accuracy
-
-
-class NNHistoryProgress(HistoryProgress):
-    def __init__(self, history: Any):
-        super().__init__()
-        self.history = history
-        self.has_valid = 'val_loss' in self.history
-
-    def show(self) -> None:
-        """Show a plot containing the loss and accuracy for training and/or validation."""
-        f, ax = pt.subplots(1, 2)
-        f.tight_layout()
-        for i, metric in enumerate(('categorical_accuracy', 'loss')):
-            ax[i].grid(True)
-            ax[i].set_xlabel('Epoch')
-            ax[i].set_ylabel(metric.replace('_', ' ').capitalize())
-            ax[i].plot(ny.arange(len(self.history[metric])), self.history[metric], label='train')
-        if self.has_valid:
-            ax[0].plot(ny.arange(len(self.history['val_loss'])), self.history['val_categorical_accuracy'], label='valid')
-            ax[0].legend()
-            ax[1].plot(ny.arange(len(self.history['val_loss'])), self.history['val_loss'], label='valid')
-            ax[1].legend()
-        pt.show()
-
-    @property
-    def accuracy(self):
-        """Return the last train and/or valid accuracy value."""
-        return self.history['categorical_accuracy'][-1], \
-               self.history['val_categorical_accuracy'][-1] if self.has_valid else None
-
-
-class TorchHistoryProgress(HistoryProgress):
-    def __init__(self, history: Tuple[torch.Tensor, ...]):
-        super().__init__()
-
-        self.history = {
-            'train_loss': history[0],
-            'train_accuracy': history[1],
-        }
-
-        if len(history) >= 3:
-            self.history['valid_accuracy'] = history[2]
-        if len(history) >= 4:
-            self.history['valid_loss'] = history[3]
-
-    def show(self) -> None:
-        """Show a plot containing the loss and accuracy for training and/or validation."""
-        f, ax = pt.subplots(1, 2, figsize=(10, 5))
-        f.tight_layout()
-        for i, metric in enumerate(('train_accuracy', 'train_loss')):
-            ax[i].grid(True)
-            ax[i].set_xlabel('Epoch')
-            ax[i].set_ylabel(metric.split('_')[1].capitalize())
-            ax[i].plot(ny.arange(len(self.history[metric])), self.history[metric], label='train')
-        for i, metric in enumerate(('valid_accuracy', 'valid_loss')):
-            if not (metric in self.history):
-                continue
-            ax[i].plot(ny.arange(len(self.history[metric])), self.history[metric], label='valid')
-            ax[i].legend()
-        pt.show()
-
-    @property
-    def accuracy(self):
-        """Return the last train and/or valid accuracy value."""
-        return self.history['train_accuracy'][-1], \
-               self.history['valid_accuracy'][-1] if 'valid_accuracy' in self.history else None
-
-    @property
-    def loss(self):
-        """Return the last train and/or valid loss value."""
-        return self.history['train_loss'][-1], \
-               self.history['valid_loss'][-1] if 'valid_loss' in self.history else None
-
-
-HP = TypeVar('HP', bound=HyperParams)
-
-
+HP = TypeVar('HP', bound=Any)
 class Model(abc.ABC, Generic[HP]):
+    """Base Model class used to abstract various implementations in different
+    frameworks. Each deriving model has to implement both a fitting and a prediction
+    function. Note: HP represents the HyperParameters of the model."""
     hparams: HP
 
     def __init__(self, hparams: HP):
@@ -207,8 +47,16 @@ class Model(abc.ABC, Generic[HP]):
 
     @abc.abstractmethod
     def predict(self, data: ny.ndarray) -> ny.ndarray:
-        """Predict an array of labels for the given data."""
+        """Predict an array of some sort (ex. embeddings/labels) for the given data."""
         raise NotImplementedError()
+
+
+class ClassifierModel(Model[HP], Generic[HP]):
+    """Abstract model class which adds two helper methods to the base model class:
+        - accuracy - computes an accuracy after predicting the labels
+        - conf - computes a confusion matrix after predicting the labels"""
+    def __init__(self, hparams: HP):
+        super().__init__(hparams)
 
     def accuracy(self, data: ny.ndarray, labels_t: ny.ndarray) -> float:
         """Compute the accuracy for the given data against the true labels."""
@@ -220,10 +68,14 @@ class Model(abc.ABC, Generic[HP]):
         labels_p = self.predict(data)
         return confusion_matrix(labels_t, labels_p)
 
+
 TSKModel = TypeVar('TSKModel', bound=sn.base.ClassifierMixin |
                                      sn.base.BaseEstimator)
-
-class SKModel(Model[HP], Generic[HP, TSKModel]):
+class SKModel(ClassifierModel[HP], Generic[HP, TSKModel]):
+    """Base model class used to abstract away implementation details of
+    scikit-learn models. Because the SKLearn framework uses common methods
+    for various algorithms, the fitting and prediction functions are alike
+    for many of them."""
     model_: TSKModel
 
     def __init__(self, hparams: HP, model: TSKModel):
@@ -251,6 +103,7 @@ class SKModel(Model[HP], Generic[HP, TSKModel]):
 
 
 class BoostedTreesModel(SKModel[BoostedTreesParams, GradientBoostingClassifier]):
+    """Boosted Trees SKLearn Classifier"""
     def __init__(self, hparams: BoostedTreesParams, verbose: int = 0):
         super().__init__(hparams, GradientBoostingClassifier(
             learning_rate=hparams['learning_rate'],
@@ -262,6 +115,7 @@ class BoostedTreesModel(SKModel[BoostedTreesParams, GradientBoostingClassifier])
 
 
 class SVMModel(SKModel[SVMParams, SVC]):
+    """SVM SKLearn Classifier"""
     def __init__(self, hparams: SVMParams, verbose: bool = True):
         super().__init__(hparams=hparams, model=SVC(C=hparams['C'],
                                                     kernel=hparams['kernel'],
@@ -270,6 +124,7 @@ class SVMModel(SKModel[SVMParams, SVC]):
 
 
 class KNNModel(SKModel[KNNParams, KNeighborsClassifier]):
+    """KNN SKLearn Classifier"""
     def __init__(self, hparams: KNNParams):
         super().__init__(hparams=hparams, model=KNeighborsClassifier(
             n_neighbors=hparams['n_neighbors'],
@@ -277,7 +132,11 @@ class KNNModel(SKModel[KNNParams, KNeighborsClassifier]):
         ))
 
 
-class TCNNModel(Model[TCNNParams]):
+class TCNNModel(ClassifierModel[TCNNParams]):
+    """Temporal Convolutional Neural Network Model Classifier written using Tensorflow.
+
+    Receives data of size (N, C, 1, S) and applies convolutions over the temporal
+    axis S, then trains some fully-connected layers on top to predict the user."""
     def __init__(self, hparams: TCNNParams, root: pb.Path = None):
         super().__init__(hparams)
 
@@ -422,10 +281,12 @@ class TCNNModel(Model[TCNNParams]):
         return GpuStatsLogger(['/gpu:0'], memory_utilization=True, gpu_utilization=True)
 
     def lr_updater_callback(self) -> tw.keras.callbacks.Callback:
+        # Update the learning rate on each epoch using custom scheduling
         return tw.keras.callbacks.LearningRateScheduler(verbose=1,
           schedule=self.periodic_rate_decrementer(*self.hparams['lr_update']))
 
     def fitting_callbacks(self) -> List[tw.keras.callbacks.Callback]:
+        # Use multiple callbacks after each epoch
         return [
           self.epoch_graph_callback(),
           self.gpu_utiliz_callback(),
@@ -433,7 +294,13 @@ class TCNNModel(Model[TCNNParams]):
         ]
 
 
-class AttentionTCNN(Model[AttentionTCNNParams]):
+class AttentionTCNNModel(ClassifierModel[AttentionTCNNParams]):
+    """Attention-based Temporal Convolutional Neural Network Model Classifier
+    written using PyTorch.
+
+    Receives data of size (N, C, 1, S) and applies residual-convolutions over the temporal
+    axis S followed by SelfAttentionModules, then trains some fully-connected layers on
+    top to predict the user."""
     def __init__(self, hparams: AttentionTCNNParams, device: torch.device, verbose: bool = True):
         super().__init__(hparams)
 
@@ -444,7 +311,7 @@ class AttentionTCNN(Model[AttentionTCNNParams]):
         self.verbose = verbose
 
         # Parameterize the model
-        self.in_chan = 1
+        self.in_chan = 3
         self.out_chan = 20
         self.loss_fn = nn.CrossEntropyLoss(reduction='none')
 
@@ -466,8 +333,10 @@ class AttentionTCNN(Model[AttentionTCNNParams]):
                   valid_data: ny.ndarray = None, valid_labels: ny.ndarray = None) -> HistoryProgress:
         # Prepare data for processing
         train_loader, \
-        valid_loader = self.__get_loaders(train_data, train_labels, \
-                                          valid_data, valid_labels)
+        valid_loader = get_loaders(train_data, train_labels, \
+                                   valid_data, valid_labels, \
+                                   shuffle=True, batch=self.hparams['n_batch'],
+                                   workers=self.n_workers, prefetch=self.n_prefetch)
 
         # Instantiate the optimizer using the model's params
         opt = self.hparams['optim'](self.model_.parameters())
@@ -489,47 +358,115 @@ class AttentionTCNN(Model[AttentionTCNNParams]):
         return TorchHistoryProgress(history)
 
     def predict(self, data: ny.ndarray) -> ny.ndarray:
-        loader = self.__get_loader(data, shuffle=False)
+        loader = get_loader(data, shuffle=False, batch=self.hparams['n_batch'], \
+                            workers=self.n_workers, prefetch=self.n_prefetch)
         y_hat = self.model_.predict(loader, with_labels=False)
         return y_hat
 
-    def __get_loaders(self, train_data: ny.ndarray, train_labels: ny.ndarray,
-                      valid_data: ny.ndarray = None, valid_labels: ny.ndarray = None) -> Tuple[data.DataLoader, data.DataLoader]:
-        """Create and return data.DataLoader for the training data and validation if
-        it's not None. The data is batched and the following operations are applied:
-            - labels are mapped from [1, C] to [0, C - 1]
-            - the data is reshaped from (N, F) to (N, C, T)
 
-        Args:
-            train_data (ny.ndarray): The training data to fit on later.
-            train_labels (ny.ndarray): The training labels used for supervision.
-            valid_data (ny.ndarray, optional): The validation data to evaluate the model. Defaults to None.
-            valid_labels (ny.ndarray, optional): The validation labels to evaluate the model. Defaults to None.
+class AutoEncoderModel(Model[AutoEncoderParams]):
+    """Convolutional AutoEncoder which produces sparse embeddings in lower dimensions
+    in order to better represent the input data and remove noise."""
+    def __init__(self, hparams: AutoEncoderParams, device: torch.device | None = None,
+                 verbose: bool = False) -> None:
+        super().__init__(hparams)
 
-        Returns:
-            Tuple[data.DataLoader, data.DataLoader]: The training loader
-            and the validation one if the provided data is not None, otherwise it's None.
-        """
-        train_loader = self.__get_loader(train_data, train_labels)
-        valid_loader = self.__get_loader(valid_data, valid_labels) \
-                       if valid_data is not None and valid_labels is not None else None
-        return train_loader, valid_loader
+        # Training params
+        self.device = device
+        self.verbose = verbose
+        self.prefetch = 2
+        self.workers = 0
 
-    def __get_loader(self, data: ny.ndarray, labels: ny.ndarray | None = None, shuffle: bool = True) -> data.DataLoader:
-        """Create and return a single dta.DataLoader. The data is batched and
-        the following operations are applied:
-            - labels are mapped from [1, C] to [0, C - 1]
-            - the data is reshaped from (N, F) to (N, C, T)
+        # Parameterize the model
+        self.in_chan = 3
 
-        Args:
-            data (ny.ndarray): The data to be provided to the model.
-            labels (ny.ndarray): The labels used for supervision.
+        # Instantiate the model to use it later for training & prediction
+        self.model_ = AutoEncoder(in_chan=self.in_chan,
+                                  filter_chan=self.hparams['n_filters'],
+                                  embedding_features=self.hparams['embedding_features'],
+                                  activ_fn=self.hparams['activ_fn'](),
+                                  dropout=self.hparams['dropout'],
+                                  init_fn=self.hparams['init_fn'],
+                                  bias=self.hparams['bias'],
+                                  device=device,
+                                  verbose=verbose).to(self.device)
 
-        Returns:
-            data.DataLoader: A loader that gives back a mini-batch of paired input data and labels.
-        """
-        dataset = SmartDataset(data, labels)
-        loader = DataLoader(dataset, batch_size=self.hparams['n_batch'],
-                            shuffle=shuffle, num_workers=self.n_workers,
-                            pin_memory=True, prefetch_factor=self.n_prefetch)
-        return loader
+    def fit(self, train_data: ny.ndarray, train_labels: ny.ndarray,
+                  valid_data: ny.ndarray = None, valid_labels: ny.ndarray = None) -> HistoryProgress:
+        # Prepare data for processing
+        train_loader, \
+        valid_loader = get_loaders(train_data, train_labels, \
+                                   valid_data, valid_labels, \
+                                   shuffle=True, batch=self.hparams['n_batch'], \
+                                   workers=self.workers, prefetch=self.prefetch)
+
+        # Instantiate the optimizer using the model's params
+        opt = self.hparams['optim'](self.model_.parameters())
+
+        # Optionally use a scheduler to improve the stability & convergence of the training
+        if 'sch_lr' in self.hparams and self.hparams['sch_lr'] is not None:
+            sch = self.hparams['sch_lr'](opt, self.verbose)
+        else:
+            sch = None
+
+        # Train the network and evaluate it over each epoch
+        history = self.model_.fit(train_loader, valid_loader,
+                                  loss_fn=self.hparams['loss_fn'],
+                                  optim=opt, scheduler=sch,
+                                  n_epochs=self.hparams['n_epochs'])
+
+        # Expose the history of the training (and validation)
+        return TorchHistoryProgress(history)
+
+    def predict(self, data: ny.ndarray, with_loss: bool = False) -> ny.ndarray | Tuple[ny.ndarray, float]:
+        """Map the data to a lower representation called embeddings."""
+        loader = get_loader(data, shuffle=False, batch=self.hparams['n_batch'], \
+                            workers=self.workers, prefetch=self.prefetch)
+        if with_loss:
+            embeddings, loss = self.model_.predict(loader, with_labels=False, \
+                                                   loss_fn=self.hparams['loss_fn'])
+            return embeddings.numpy(), loss
+        return self.model_.predict(loader, with_labels=False).numpy()
+
+
+class HybridAutoEncoderClassifier(ClassifierModel[None], Generic[HP]):
+    """Hybrid classifier model which trains a generic classifier on top of
+    data embeddings produced by a CNN AutoEncoder."""
+    def __init__(self, hpa_model: AutoEncoderModel,
+                       hpc_model: ClassifierModel[HP],
+                       verbose: bool = True) -> None:
+        super().__init__(hparams=None)
+        self.verbose = verbose
+        self.ae_model = hpa_model
+        self.cl_model = hpc_model
+
+    def fit(self, train_data: ny.ndarray, train_labels: ny.ndarray,
+                  valid_data: ny.ndarray = None, valid_labels: ny.ndarray = None) -> HistoryProgress:
+        # First stage of training - Learn embeddings
+        hpa_hist = self.ae_model.fit(train_data, train_labels, \
+                                     valid_data, valid_labels)
+        if self.verbose:
+            hpa_hist.show()
+
+        # Transform the data into embeddings
+        train_embeddings = self.ae_model.predict(train_data)
+        valid_embeddings = None if valid_data is None else self.ae_model.predict(valid_data)
+
+        # Second stage of training - Train classifier on top of embeddings
+        hpc_hist = self.cl_model.fit(train_embeddings, train_labels, \
+                                     valid_embeddings, valid_labels)
+
+        # Return the history of the classifier
+        return hpc_hist
+
+    def predict(self, data: ny.ndarray) -> ny.ndarray:
+        """Predict an array of labels for the given data."""
+        if self.verbose:
+            embeddings, loss = self.ae_model.predict(data, with_loss=True)
+            print(f'Mean Reconstruciton Loss: {loss:.3f}')
+        else:
+            embeddings = self.ae_model.predict(data)
+
+        # Predict using the generated embeddings
+        return self.cl_model.predict(embeddings)
+

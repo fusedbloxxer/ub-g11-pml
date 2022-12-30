@@ -1,16 +1,15 @@
 import torch
 import typing
-import numpy as ny
 import torch.nn as nn
 import torch.utils.data as data
-import matplotlib.pyplot as pt
 import torch.nn.functional as FL
-from torch.optim.lr_scheduler import _LRScheduler as Scheduler
 from torch.optim.optimizer import Optimizer
-from collections import OrderedDict
+from torch.optim.lr_scheduler import _LRScheduler as Scheduler
 
 
 class Swish(nn.Module):
+  """Overcome the saturating gradients issue for the ReLU activation function
+  by leaving a small window for gradients to flow on the negative part of the axis."""
   def __init__(self):
     super().__init__()
 
@@ -19,8 +18,11 @@ class Swish(nn.Module):
 
 
 class RepeatModule(nn.Module):
+  """Generate and chain modules n times in order to create deeper architectures."""
   def __init__(self, module_gen: typing.Callable[[], nn.Module], times: int):
     super(RepeatModule, self).__init__()
+
+    # Inner params
     self.layers_ = nn.Sequential()
 
     # Generate N modules and chain them sequentially
@@ -32,13 +34,19 @@ class RepeatModule(nn.Module):
 
 
 class ResModule2d(nn.Module):
+  """Wrap an inner module between two bottleneck conversion blocks in order to
+  speed up execution time while having an approximate loss, and offer a residual/identity
+  path for gradient flow."""
   def __init__(self, in_chan: int, out_chan: int, module: nn.Module = None, bottleneck: int = 1, bias: bool = True):
     super(ResModule2d, self).__init__()
+
+    # Internal params
     self.layers_ = nn.Sequential(module)
     self.bottleneck_ = bottleneck
     self.in_chan = in_chan
     self.out_chan = out_chan
 
+    # Conditionally wrap the inner module between two bottleneck conversion blocks
     if bottleneck != 1:
       self.layers_.insert(0, nn.Conv2d(in_chan, in_chan // bottleneck, 1, bias=bias))
     if bottleneck != 1 or in_chan != out_chan:
@@ -47,6 +55,8 @@ class ResModule2d(nn.Module):
       self.res_ = nn.Conv2d(in_chan, out_chan, 1, bias=bias)
 
   def forward(self, x: torch.Tensor) -> torch.Tensor:
+    """Apply the inner module over the input data and add either the input
+    to the output or a channel-modified version by using 1x1 conv."""
     if self.in_chan == self.out_chan:
       return x + self.layers_(x)
     else:
@@ -75,11 +85,13 @@ class ResBlock2d(nn.Module):
     self.layers_ = ResModule2d(in_chan, out_chan, module, bottleneck)
 
   def __create_block(self) -> nn.Module:
+    """Creates inner blocks from a set of conditionally applied operations. The
+    convolution operation is applied across the temporal dimension."""
     layers = nn.Sequential()
 
     layers.append(nn.Conv2d(self.in_chan // self.bottleneck,
                             self.in_chan // self.bottleneck,
-                            self.kernel_size,
+                            (1, self.kernel_size),
                             padding='same',
                             bias=self.bias))
 
@@ -110,20 +122,19 @@ class SelfAttentionBlock2d(nn.Module):
     self.conv_out = nn.Conv2d(self.embed_chan, in_chan, 1, bias=bias)
 
   def forward(self, x: torch.Tensor) -> torch.Tensor:
-    """Receive an input of the following form size: (N, C, D, S), where
-    N is the mini-batch size, C is the number of channels, D is the number
-    of dimensions / coordinates and S is the length of the sequence and apply
-    attention.
+    """Receive an input of the following form size: (N, C, 1, S), where
+    N is the mini-batch size, C is the number of channels and S is the length of
+    the sequence and apply attention.
 
     Args:
-        x (torch.Tensor): An input of size (N, C, D, S).
+        x (torch.Tensor): An input of size (N, C, 1, S).
 
     Returns:
         torch.Tensor: A new tensor on which selfAttention was applied according
         to the "Non-local Neural Networks" paper (2017, He et. al).
     """
     # Extract dimensions to enable reshaping later
-    N, C, D, S = x.shape
+    N, _, D, S = x.shape
 
     # Embed input using bottleneck
     query: torch.Tensor = self.conv_query(x)
@@ -147,24 +158,71 @@ class SelfAttentionBlock2d(nn.Module):
 
 
 class GlobalMaxPool2d(nn.Module):
+  """Apply MaxPool to reduce the spatial/temporal dimensions and provide
+  the number of channels as features to linear units."""
   def __init__(self) -> None:
     super().__init__()
 
+    # Internal layers
+    self.pool = nn.AdaptiveMaxPool2d(output_size=(1, 1))
+    self.flatten = nn.Flatten(start_dim=1)
+
   def forward(self, x: torch.Tensor) -> torch.Tensor:
-    return FL.adaptive_max_pool2d(x, output_size=(1, 1)).flatten(start_dim=1)
+    return self.flatten(self.pool(x))
 
 
-class TemporalAttentionNN(nn.Module):
+class NNModule(nn.Module):
+  """Base class for NeuralNetwork models. Offers support for weight init,
+  and currently used device to hold the params."""
+  def __init__(self, init_fn: typing.Callable[[torch.Tensor], None] = None,
+               device: torch.device | None = None, verbose: bool = False,
+               bias: bool = True):
+    super().__init__()
+    self._device = device
+    self.verbose = verbose
+    self.init_fn = init_fn
+    self.bias = bias
+
+  def _weights_initialization(self, module: nn.Module) -> None:
+    # Define range of modules that will be weight-initialized according to init_fn
+    allowed_types = tuple([
+      nn.Linear,
+      nn.Conv2d,
+    ])
+
+    # Apply the init_fn
+    if isinstance(module, allowed_types):
+      self.init_fn(module.weight)
+
+      if self.bias:
+        torch.nn.init.constant_(module.bias, 0.0)
+
+  @property
+  def device(self) -> torch.device:
+    """Get the currently used device for the model or CPU by default."""
+    if self._device is None:
+      return torch.device('cpu')
+    else:
+      return self._device
+
+
+class TemporalAttentionNN(NNModule):
+  """Exploit the temporal/sequential nature of the input by using convolutions
+  along this dimension and treat the spatial coordinates of the samples as
+  channels in order to get better latent representations for each temporal point.
+  Apply self-attention to keep global information along every step and use
+  residual connections to improve the gradient flow during model optimization."""
   def __init__(self, in_chan: int, out_chan: int,
                s_filters: int = 3, n_filters: int = 128, n_units: int = 1024,
                activ_fn: nn.Module = Swish, norm: bool = True,
                bottleneck: int = 2, dropout: float = 0.3, bias: bool = True,
                init_fn: typing.Callable[[torch.Tensor], None] = None,
                device: torch.device = None, verbose: bool = False):
-    super().__init__()
-    self._device = device
-    self.verbose = verbose
-    self.init_fn = init_fn
+    super().__init__(init_fn=init_fn, device=device, verbose=verbose, bias=bias)
+
+    # Internal params
+    self.n_fcn_hidden_layers = 3
+    self.n_cnn_hidden_layers = 2
     self.inner_repeat = 2
     self.bias = bias
 
@@ -179,69 +237,55 @@ class TemporalAttentionNN(nn.Module):
                  bottleneck, bias, self.inner_repeat, dropout),
     ))
 
-    # --- Stage 2 Residual Blocks ---
-    self.layers_.add_module(name='stage_2', module=nn.Sequential(
-      ResBlock2d(n_filters, n_filters * 2, s_filters, activ_fn, norm,
-                 bottleneck, bias, self.inner_repeat, dropout),
-      ResBlock2d(n_filters * 2, n_filters * 2, s_filters, activ_fn, norm,
-                 bottleneck, bias, self.inner_repeat, dropout),
-    ))
-
-    # --- Stage 3 Residual Blocks ---
-    self.layers_.add_module(name='stage_3', module=nn.Sequential(
-      ResBlock2d(n_filters * 2, n_filters * 4, s_filters, activ_fn, norm,
-                 bottleneck, bias, self.inner_repeat, dropout),
-      ResBlock2d(n_filters * 4, n_filters * 4, s_filters, activ_fn, norm,
-                 bottleneck, bias, self.inner_repeat, dropout),
-    ))
+    # --- Hidden Residual Blocks ---
+    for i in range(self.n_cnn_hidden_layers):
+      self.layers_.add_module(name=f'stage_{i + 2}', module=nn.Sequential(
+        nn.MaxPool2d((1, s_filters), (1, 2)),
+        ResBlock2d(n_filters * 2 ** i, n_filters * 2 ** i, s_filters,
+                   activ_fn, norm, bottleneck, bias, self.inner_repeat, dropout),
+        nn.MaxPool2d((1, s_filters), (1, 2)),
+        ResBlock2d(n_filters * 2 ** i, n_filters * 2 ** (i + 1), s_filters,
+                   activ_fn, norm, bottleneck, bias, self.inner_repeat, dropout),
+        SelfAttentionBlock2d(n_filters * 2 ** (i + 1), bottleneck, bias),
+      ))
 
     # --- Reshaping the features ---
     self.layers_.append(GlobalMaxPool2d())
 
-    # --- Hidden FCN Layer ---
+    # --- Input FCN Layer ---
     self.layers_.add_module(name='fcn_1', module=nn.Sequential(
-      nn.Dropout(dropout),
-      nn.Linear(n_filters * 4, n_units, bias),
+      nn.Linear(n_filters * 2 ** self.n_cnn_hidden_layers, n_units, bias),
       nn.BatchNorm1d(n_units) if norm else nn.Identity(),
       activ_fn(),
-    ))
-    self.layers_.add_module(name='fcn_2', module=nn.Sequential(
-      nn.Dropout(dropout),
-      nn.Linear(n_units, n_units * 2, bias),
-      nn.BatchNorm1d(n_units * 2) if norm else nn.Identity(),
-      activ_fn(),
+      nn.Dropout(dropout)
     ))
 
-    # --- Final Layer ---
-    self.layers_.append(nn.Linear(n_units * 2, out_chan, bias))
+    # --- Hidden FCN Layers ---
+    for i in range(self.n_fcn_hidden_layers):
+      self.layers_.add_module(name=f'fcn_{i + 2}', module=nn.Sequential(
+        nn.Linear(n_units * 2 ** i, n_units * 2 ** (i + 1), bias),
+        nn.BatchNorm1d(n_units * 2 ** (i + 1)) if norm else nn.Identity(),
+        activ_fn(),
+        nn.Dropout(dropout),
+      ))
+
+    # --- Output FCN Layer ---
+    self.layers_.append(nn.Linear(n_units * 2 ** (self.n_fcn_hidden_layers), out_chan, bias))
 
     # Optionally initialize the weights with a custom approach
     if self.init_fn:
-      self.apply(self.__weights_initialization)
-
-  def __weights_initialization(self, module: nn.Module) -> None:
-    # Define range of modules that will be weight-initialized according to init_fn
-    allowed_types = tuple([
-      nn.Linear,
-      nn.Conv2d,
-    ])
-
-    # Apply the init_fn
-    if isinstance(module, allowed_types):
-      self.init_fn(module.weight)
-
-      if self.bias:
-        torch.nn.init.zeros_(module.bias)
+      self.apply(self._weights_initialization)
 
   def forward(self, x: torch.Tensor) -> torch.Tensor:
     return self.layers_(x)
 
   def predict(self, loader: data.DataLoader, with_labels: bool = True,
               loss_fn: nn.Module | None = None) -> typing.Tuple[torch.Tensor, ...]:
-    """Predict the list of labels for the given data (not a mini-batch). Do not SHUFFLE!
+    """Predict the list of labels for the given data (not a mini-batch). Do not SHUFFLE
+    the dataset to be able to get the expected labels in the same initial order.
 
     Args:
-        data (torch.Tensor): The list of input data.
+        loader (data.DataLoader): A DataLoader wrapping up the current dataset.
         with_labels (bool): Specifies if labels are served in the loader (ex. for validation).
         loss_fn (torch.nn.Module): A loss functions that does not reduce the output.
 
@@ -291,7 +335,22 @@ class TemporalAttentionNN(nn.Module):
            torch.tensor(loss_out, dtype=torch.float).mean().item()
 
   def fit(self, train_loader: data.DataLoader, val_loader: data.DataLoader | None,
-          loss_fn: nn.Module, optim: Optimizer, n_epochs: int, scheduler: Scheduler | None = None) -> typing.Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+          loss_fn: nn.Module, optim: Optimizer, n_epochs: int, scheduler: Scheduler | None = None) -> typing.Dict[str, torch.Tensor]:
+    """Train the model on the first given loader and optionally evaluate at each epoch
+    the metric on the validation loader.
+
+    Args:
+        train_loader (data.DataLoader): The loader for the training subset.
+        val_loader (data.DataLoader | None): The loader for the validation subset.
+        loss_fn (nn.Module): A loss function used for optimization and as a metric.
+        optim (Optimizer): The optimizer which changes internally the weights of the NN.
+        n_epochs (int): How much the network should train for.
+        scheduler (Scheduler | None, optional): Adjust the LR based on loss criteria. Defaults to None.
+
+    Returns:
+        typing.Dict[str, torch.Tensor]: Dict containing keys for mode + metric
+        and the associated values.
+    """
     # Prepare the model for learning
     self.requires_grad_(requires_grad=True)
     self.train()
@@ -346,11 +405,17 @@ class TemporalAttentionNN(nn.Module):
 
     # Return the history of the training and validation processes
     if val_loader is not None:
-      return torch.tensor(loss), torch.tensor(accy), \
-            (torch.tensor(vccy) if val_loader is not None else None), \
-            (torch.tensor(vlos) if val_loader is not None else None)
+      return {
+        'train_loss': torch.tensor(loss),
+        'valid_loss': torch.tensor(vlos),
+        'train_accuracy': torch.tensor(accy),
+        'valid_accuracy': torch.tensor(vccy),
+      }
     else:
-      return torch.tensor(loss), torch.tensor(accy)
+      return {
+        'train_loss': torch.tensor(loss),
+        'train_accuracy': torch.tensor(accy),
+      }
 
   def train_step(self, X: torch.Tensor, y: torch.Tensor,
                  loss_fn: nn.Module, optim: Optimizer) -> typing.Tuple[torch.Tensor, torch.Tensor]:
@@ -359,7 +424,7 @@ class TemporalAttentionNN(nn.Module):
     Args:
         X (torch.Tensor): A mini-batch of input data.
         y (torch.Tensor): A mini-batch of input labels.
-        loss_fn (nn.Module): The loss function to minimize, does not reduce by itself!
+        loss_fn (nn.Module): The loss function to minimize, must not reduce the output.
         optim (Optimizer): The optimizer used to adjust the weights.
 
     Returns:
@@ -385,41 +450,307 @@ class TemporalAttentionNN(nn.Module):
     y_hat: torch.Tensor = torch.argmax(logits, dim=1) + 1 # [0, 19] -> [1, 20]
     return loss.detach().cpu().item(), y_hat.detach().cpu()
 
-  @property
-  def device(self) -> torch.device:
-    if self._device is None:
-      return torch.device('cpu')
-    else:
-      return self._device
 
-
-class SmartDataset(data.Dataset):
-  def __init__(self, data: ny.ndarray, labels: ny.ndarray | None = None,
-               n_embed: int = 3, n_seq: int = 150) -> None:
+class CompressBlock(nn.Module):
+  """Compress the data by pooling along the temporal axis using convolutions."""
+  def __init__(self, in_chan: int, out_chan: int, activ_fn: nn.Module,
+               bias: bool = True, dropout: float = 0.3) -> None:
     super().__init__()
 
-    # Save given input data
-    self.data_ = torch.tensor(data).reshape((-1, 1, n_embed, n_seq))
-    self.labels_ = None if labels is None else torch.tensor(labels) - 1
+    # Internal params
+    kernel = 3
 
-  @property
-  def data(self) -> torch.Tensor:
-    return self.data_
+    # Layers - Apply a convolution then reduce the output and expand the n. of channels
+    self.conv = nn.Conv2d(in_chan, out_chan, (1, kernel), 1, 'same', bias=bias)
+    self.bn = nn.BatchNorm2d(out_chan)
+    self.activ_fn = activ_fn
+    self.drop = nn.Dropout2d(p=dropout)
+    self.pool = nn.Sequential(
+      nn.Conv2d(out_chan, out_chan, (1, 3), stride=(1, 2), padding=(0, 1), bias=bias),
+      nn.BatchNorm2d(out_chan),
+      activ_fn,
+    )
 
-  @property
-  def labels(self) -> torch.Tensor | None:
-    return None if self.labels_ is None else self.labels_
+  def forward(self, x: torch.Tensor) -> torch.Tensor:
+    x = self.conv(x)
+    x = self.bn(x)
+    x = self.activ_fn(x)
+    x = self.drop(x)
+    x = self.pool(x)
+    return x
 
-  def __getitem__(self, index: typing.Any) -> typing.Tuple[torch.Tensor, torch.Tensor | None]:
-    # Select the desired sample and keep other dimensions to allow slicing
-    x_sample = self.data_[index, ...]
 
-    # Return both the sample and its label
-    if self.labels_ is not None:
-      return x_sample, self.labels_[index, ...]
+class DecompressBlock(nn.Module):
+  """Decompress the data by unpooling along the temporal axis using transposed
+  convolutions and add the necessary padding to obtain the original size."""
+  def __init__(self, in_chan: int, out_chan: int, activ_fn: nn.Module,
+               bias: bool = True, dropout: float = 0.3, pad_side: int = 0,
+               norm: bool = True, unpool_activ_fn: nn.Module | None = None) -> None:
+    super().__init__()
 
-    # Or only the sample if the label is missing
-    return x_sample
+    # Internal params
+    kernel = 3
+    unpool_activ_fn = activ_fn if unpool_activ_fn is None else unpool_activ_fn
 
-  def __len__(self) -> int:
-    return self.data_.shape[0]
+    # Layers - Increase the temporal axis by using a TConv then reduce the number
+    # of channels
+    self.unpool = nn.Sequential(
+      nn.ConvTranspose2d(in_chan, in_chan, (1, kernel), (1, 2), padding=(0, 1),
+                         output_padding=(0, pad_side), bias=bias),
+      nn.BatchNorm2d(in_chan),
+      unpool_activ_fn,
+    )
+    self.conv = nn.Conv2d(in_chan, out_chan, (1, kernel), 1, padding='same', bias=bias)
+    self.bn = nn.BatchNorm2d(out_chan) if norm else nn.Identity()
+    self.activ_fn = activ_fn
+    self.drop = nn.Dropout2d(p=dropout)
+
+  def forward(self, x: torch.Tensor) -> torch.Tensor:
+    x = self.unpool(x)
+    x = self.conv(x)
+    x = self.bn(x)
+    x = self.activ_fn(x)
+    x = self.drop(x)
+    return x
+
+
+class Encoder(nn.Module):
+  """Apply a number of compression blocks to reduce the initial representation
+  then squeeze the spatial and temporal dimensions into a fixed embedding size
+  for the bottleneck."""
+  def __init__(self, in_chan: int, filter_chan: int, embedding_features: int,
+               activ_fn: nn.Module, bias: bool = True, dropout: float = 0.3) -> None:
+    super().__init__()
+
+    # Layers - Three compression blocks which reduce the temporal axis and
+    # expand the n. of channels. Apply a linear layer at the end (using conv).
+    self.comp1 = CompressBlock(in_chan, filter_chan, activ_fn, bias, dropout)
+    self.comp2 = CompressBlock(filter_chan, filter_chan * 2, activ_fn, bias, dropout)
+    self.comp3 = CompressBlock(filter_chan * 2, filter_chan * 4, activ_fn, bias, dropout)
+    self.embed = nn.Sequential(
+      nn.Conv2d(filter_chan * 4, embedding_features, (1, 19), bias=bias),
+      nn.BatchNorm2d(embedding_features),
+      activ_fn,
+      nn.Flatten(),
+      nn.Dropout(p=dropout),
+    )
+
+  def forward(self, x: torch.Tensor) -> torch.Tensor:
+    x = self.comp1(x)
+    x = self.comp2(x)
+    x = self.comp3(x)
+    x = self.embed(x)
+    return x
+
+
+class Decoder(nn.Module):
+  """Recover the spatial and temporal axis from the bottleneck by applying
+  a TConv. Then reduce the n. of channels and expand the temporal axis to the
+  original input size."""
+  def __init__(self, embedding_features: int, filter_chan: int, out_chan: int,
+               activ_fn: nn.Module, bias: bool = True, dropout: float = 0.3) -> None:
+    super().__init__()
+
+    # Layers - Apply a TConv and decompress the embeddings to the original size.
+    self.unembed = nn.Sequential(
+      nn.Unflatten(dim=1, unflattened_size=(embedding_features, 1, 1)),
+      nn.ConvTranspose2d(embedding_features, filter_chan * 4, (1, 19), bias=bias),
+      nn.BatchNorm2d(filter_chan * 4),
+      activ_fn,
+      nn.Dropout2d(p=dropout),
+    )
+    self.decomp1 = DecompressBlock(filter_chan * 4, filter_chan * 2, activ_fn, bias, dropout, 1)
+    self.decomp2 = DecompressBlock(filter_chan * 2, filter_chan, activ_fn, bias, dropout, 0)
+    self.decomp3 = DecompressBlock(filter_chan, out_chan, nn.Identity(), bias, 0, 1, False,
+                                   unpool_activ_fn=activ_fn)
+
+  def forward(self, x: torch.Tensor) -> torch.Tensor:
+    x = self.unembed(x)
+    x = self.decomp1(x)
+    x = self.decomp2(x)
+    x = self.decomp3(x)
+    return x
+
+
+class AutoEncoder(NNModule):
+  """Compresses the input data to a lower dimensional, latent representation,
+  using an Encoder and reconstruct the information by applying a Decoder.
+  The bottleneck should represent a smaller feature vector than the original
+  data, which reflects the essential characteristics of the present information."""
+  def __init__(self, in_chan: int, filter_chan: int, embedding_features: int,
+               activ_fn: nn.Module, dropout: float = 0.3, bias: bool = True,
+               init_fn: typing.Callable[[torch.Tensor], None] | None = None,
+               device: torch.device | None = None, verbose: bool = False) -> None:
+    super().__init__(init_fn=init_fn, device=device, verbose=verbose, bias=bias)
+
+    # Layers - Data -> Encoder -> Bottleneck -> Decoder -> (Data' ~ Data)
+    self.enc = Encoder(in_chan, filter_chan, embedding_features, activ_fn, bias, dropout)
+    self.dec = Decoder(embedding_features, filter_chan, in_chan, activ_fn, bias, dropout)
+
+    # Apply initialization
+    if self.init_fn:
+      self.apply(self._weights_initialization)
+
+  def encode(self, x: torch.Tensor | data.DataLoader) -> torch.Tensor:
+    """Encodes inputs of size (N, 3, 1, 150) to (N, embedding_features) for
+    a lower-dimensional representation. Can process either a mini-batch or
+    an entire data.DataLoader."""
+    if isinstance(x, torch.Tensor):
+      return self.enc(x)
+
+  def decode(self, x: torch.Tensor | data.DataLoader) -> torch.Tensor:
+    """Expects emeddings of size (N, embedding_features) and decodes them
+    to (N, 3, 1, 150). Can process either a mini-batch or
+    an entire data.DataLoader."""
+    return self.dec(x)
+
+  def forward(self, x: torch.Tensor) -> torch.Tensor:
+    # Encode and decode in one step - the full pipeline
+    return self.decode(self.encode(x))
+
+  def predict(self, loader: data.DataLoader, with_labels: bool = True,
+              loss_fn: nn.Module | None = None) -> torch.Tensor | typing.Tuple[torch.Tensor, torch.Tensor]:
+    """Given a DataLoader, encode the data and expose a bottleneck as the output.
+
+    Args:
+        loader (data.DataLoader): The loader serving data to be predicted on.
+        with_labels (bool, optional): Ignored. Defaults to True.
+        loss_fn (nn.Module | None, optional): Used to optionally compute a loss. Defaults to None.
+
+    Returns:
+        torch.Tensor | typing.Tuple[torch.Tensor, torch.Tensor]: Return the predicted
+        embeddings over the given data and the loss if loss_fn is given.
+    """
+    self.eval()
+    with torch.no_grad():
+      # Store validation stats
+      vl_loss = torch.zeros(len(loader))
+      embeddings = []
+
+      # Do prediction pass
+      for batch_i, sample in enumerate(loader):
+        # Extract the data from the mini-batch
+        X = sample if with_labels is False else sample[0]
+
+        # Send the input data to the GPU
+        X: torch.Tensor = X.to(self.device)
+
+        # Compute the output and restoration loss
+        bottleneck = self.encode(X)
+        embeddings.append(bottleneck.cpu())
+
+        # Also, compute loss if loss_fn is given
+        if loss_fn is None:
+          continue
+
+        # Restore the initial input
+        XR = self.decode(bottleneck)
+        restoration_loss: torch.Tensor = loss_fn(XR, X).mean()
+
+        # Store mini-batch loss
+        vl_loss[batch_i] = restoration_loss.cpu().item()
+
+      # Transform embeddings into proper tensor format
+      embeddings = torch.vstack(embeddings)
+
+      # Return only the embeddings as no loss could be computed
+      if not loss_fn:
+        return embeddings
+
+      # Return the embeddings and the associated mean loss
+      return embeddings, vl_loss.mean().item()
+
+  def fit(self, train_loader: data.DataLoader, val_loader: data.DataLoader | None,
+                loss_fn: nn.Module, optim: Optimizer, n_epochs: int, scheduler: Scheduler | None = None) -> typing.Dict[str, torch.Tensor]:
+    """Train the model to reconstruct the given data. Evaluates the reconstruction
+    on the validation subset if given.
+
+    Args:
+        train_loader (data.DataLoader): The loader over the training data subset.
+        val_loader (data.DataLoader | None): The loader over the optional validation subset.
+        loss_fn (nn.Module): The loss function used to train the model.
+        optim (Optimizer): The optimizer which minimizes the reconstruction loss.
+        n_epochs (int): A number of phases that the model should train for.
+        scheduler (Scheduler | None, optional): Specifies how the optimizer should
+        change the LR to smoothen out the training process. Defaults to None.
+
+    Returns:
+        typing.Dict[str, torch.Tensor]: Dict containing keys for mode + metric
+        and the associated values.
+    """
+    # Make sure the model is setup for training
+    self.requires_grad_(True)
+
+    # Store history for the entire training process
+    tr_loss = torch.zeros(n_epochs)
+    vl_loss = torch.zeros(n_epochs)
+
+    # Train the model for a number of specified epochs
+    for epoch_i in range(n_epochs):
+      # Make sure the model is setup for training
+      self.train()
+
+      # Use epoch stats for progress tracking
+      e_tr_loss = torch.zeros(len(train_loader), device=self.device)
+      if val_loader is not None:
+        e_vl_loss = torch.zeros(len(val_loader), device=self.device)
+
+      # Make a training step over the data
+      for batch_i, (X, y) in enumerate(train_loader):
+        # Move the data to the GPU for faster processing on the given data
+        X: torch.Tensor = X.to(self.device)
+
+        # Reset current state
+        optim.zero_grad()
+
+        # Do forward pass across the mini-batch
+        bottleneck: torch.Tensor = self.encode(X)
+        XR: torch.Tensor = self.decode(bottleneck)
+
+        # Compute loss & propagate & minimize restoration loss
+        restoration_loss: torch.Tensor = loss_fn(XR, X).mean()
+        restoration_loss.backward()
+        optim.step()
+
+        # Store train stats
+        e_tr_loss[batch_i] = restoration_loss.detach().item()
+
+      # Store the losses for progress tracking
+      tr_loss[epoch_i] = e_tr_loss.detach().mean().cpu().item()
+
+      # Make a validation pass at the end of the epoch
+      if val_loader is not None:
+        self.eval()
+        with torch.no_grad():
+          for batch_i, (X, _) in enumerate(val_loader):
+            # Send the input data to the GPU
+            X: torch.Tensor = X.to(self.device)
+
+            # Compute the output and restoration loss
+            XR = self.forward(X)
+            restoration_loss: torch.Tensor = loss_fn(XR, X).mean()
+
+            # Store mini-batch loss
+            e_vl_loss[batch_i] = restoration_loss.item()
+
+        # Store the losses for progress tracking
+        vl_loss[epoch_i] = e_vl_loss.mean().cpu().item()
+
+      # Adjust LR after each pass
+      if scheduler is not None:
+        scheduler.step(vl_loss[epoch_i] if val_loader else tr_loss[epoch_i])
+
+      # Display current performance
+      if self.verbose:
+        print('[epoch: {: >4d} / {: <4d}]'.format(epoch_i + 1, n_epochs), end=' ')
+        print('[epoch_loss: {:.3f}]'.format(tr_loss[epoch_i]), end=' ')
+        if val_loader is not None:
+          print('[valid_loss: {:.3f}]'.format(vl_loss[epoch_i]), end=' ')
+        print()
+
+    # Return the current stats
+    if val_loader is not None:
+      return { 'train_loss': tr_loss, 'valid_loss': vl_loss }
+    else:
+      return { 'train_loss': tr_loss }
+

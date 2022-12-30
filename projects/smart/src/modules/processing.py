@@ -2,12 +2,20 @@ from __future__ import annotations
 import copy
 import pathlib as pb
 from typing import Tuple, List, Optional
+import typing
 import pandas as ps
 import numpy as ny
 from numpy.random import default_rng
+from torch.utils.data import DataLoader
+import torch.utils.data as data
+import torch
+
 
 class Dataset(object):
-    def __init__(self, path: pb.Path):
+    def __init__(self, path: pb.Path, seed: int = 87):
+        super().__init__()
+        self.seed = seed
+
         # Load the dataset "as is" without applying preprocessing
         self.train_data,   \
         self.train_labels, \
@@ -172,6 +180,26 @@ class Dataset(object):
         self.train_data, self.train_labels = self.from_pandas(no_outliers)
         return self
 
+    def split_train_data(self, ratio: float = 8e-1, shuffle: bool = True) -> Tuple[ny.ndarray, ny.ndarray, ny.ndarray, ny.ndarray]:
+        """Split the training dataset into validation and training according
+        to the given ratio. Optionally apply shuffle to the data in order to
+        obtain different outputs."""
+        indices = ny.arange(self.train_data.shape[0])
+        if shuffle:
+            gen = default_rng(self.seed)
+            indices = gen.choice(indices, size=indices.shape[0], replace=False)
+        pivot_index = int(ny.floor(indices.shape[0] * ratio))
+
+        # Index using the pivot and generated indices
+        train_data = self.train_data[:pivot_index]
+        valid_data = self.train_data[pivot_index:]
+        train_labels = self.train_labels[:pivot_index]
+        valid_labels = self.train_labels[pivot_index:]
+
+        # Return split data partitions
+        return train_data, train_labels, \
+               valid_data, valid_labels
+
     @staticmethod
     def load_dataset(dataset_path: pb.Path) -> Tuple[list[ny.ndarray], list[ny.int64], list[ny.ndarray]]:
         """Read the whole dataset in memory available from the base path:
@@ -216,14 +244,14 @@ class Dataset(object):
         return train_data, train_labels, test_data
 
     @staticmethod
-    def impute_missing_values(sample: ny.ndarray, n_size: int) -> ny.ndarray:
+    def impute_missing_values(sample: ny.ndarray, n_size: int, seed: int = 87) -> ny.ndarray:
         """Fill in the missing values (rows) by computing the ewm."""
         sample_new = ps.DataFrame(columns=range(sample.shape[1]),
                                   index=range(n_size),
                                   dtype=ny.float64)
 
         # Generate indices to copy associated values
-        gen = default_rng()
+        gen = default_rng(seed)
 
         # To avoid filling the start and end of a sequence with repeated copies
         # of the same element, lock in the head and the tail and allow intermediary
@@ -274,5 +302,89 @@ class Dataset(object):
         return ny.array(dataset, dtype=ny.float32), mark_for_deletion
 
 
-if __name__ == '__main__':
-    print('running this file')
+class SmartDataset(data.Dataset):
+    """Reshape the data from (N, F) to (N, E, 1, S), where
+    N is the number of samples, E is the embedding size and S is the
+    sequence length and subtract one from the labels: [1, 20] -> [0, 19].
+    The transformed data is then exposed as (sample, label) pairs to the caller."""
+    def __init__(self, data: ny.ndarray, labels: ny.ndarray | None = None,
+        n_embed: int = 3, n_seq: int = 150) -> None:
+        super().__init__()
+
+        # Save given input data and reshape it as a 2D tensor with n_embed channels
+        self.data_ = torch.tensor(data).reshape((-1, n_embed, 1, n_seq))
+
+        # Because the networks use class logits internally and argmax to
+        # select the most probable class, we need to map [1, C] to [0, C) where
+        # C represents the 20 classes.
+        self.labels_ = None if labels is None else torch.tensor(labels) - 1
+
+    @property
+    def data(self) -> torch.Tensor:
+        return self.data_
+
+    @property
+    def labels(self) -> torch.Tensor | None:
+        return None if self.labels_ is None else self.labels_
+
+    def __getitem__(self, index: typing.Any) -> typing.Tuple[torch.Tensor, torch.Tensor | None]:
+        # Select the desired sample and keep other dimensions to allow slicing
+        x_sample = self.data_[index, ...]
+
+        # Return both the sample and its label
+        if self.labels_ is not None:
+            return x_sample, self.labels_[index, ...]
+
+        # Or only the sample if the label is missing
+        return x_sample
+
+    def __len__(self) -> int:
+        return self.data_.shape[0]
+
+
+def get_loaders(train_data: ny.ndarray, train_labels: ny.ndarray,
+                valid_data: ny.ndarray = None, valid_labels: ny.ndarray = None,
+                shuffle: bool = True, batch: int = 32, workers: int = 8,
+                prefetch: int = 4) -> Tuple[data.DataLoader, data.DataLoader]:
+    """Create and return data.DataLoader for the training data and validation if
+    it's not None. The data is batched and the following operations are applied:
+        - labels are mapped from [1, C] to [0, C - 1]
+        - the data is reshaped from (N, F) to (N, C, T)
+
+    Args:
+        train_data (ny.ndarray): The training data to fit on later.
+        train_labels (ny.ndarray): The training labels used for supervision.
+        valid_data (ny.ndarray, optional): The validation data to evaluate the model. Defaults to None.
+        valid_labels (ny.ndarray, optional): The validation labels to evaluate the model. Defaults to None.
+
+    Returns:
+        Tuple[data.DataLoader, data.DataLoader]: The training loader
+        and the validation one if the provided data is not None, otherwise it's None.
+    """
+    train_loader = get_loader(train_data, train_labels, shuffle=shuffle, \
+                              batch=batch, workers=workers, prefetch=prefetch)
+    valid_loader = get_loader(valid_data, valid_labels, shuffle=shuffle, \
+                              batch=batch, workers=workers, prefetch=prefetch) \
+                    if valid_data is not None and valid_labels is not None else None
+    return train_loader, valid_loader
+
+
+def get_loader(data: ny.ndarray, labels: ny.ndarray | None = None, shuffle: bool = True,
+               batch: int = 32, workers: int = 8, prefetch: int = 4) -> data.DataLoader:
+    """Create and return a single dta.DataLoader. The data is batched and
+    the following operations are applied:
+        - labels are mapped from [1, C] to [0, C - 1]
+        - the data is reshaped from (N, F) to (N, C, T)
+
+    Args:
+        data (ny.ndarray): The data to be provided to the model.
+        labels (ny.ndarray): The labels used for supervision.
+
+    Returns:
+        data.DataLoader: A loader that gives back a mini-batch of paired input data and labels.
+    """
+    dataset = SmartDataset(data, labels)
+    return DataLoader(dataset, batch_size=batch, shuffle=shuffle,
+                      num_workers=workers, pin_memory=True,
+                      prefetch_factor=prefetch)
+
