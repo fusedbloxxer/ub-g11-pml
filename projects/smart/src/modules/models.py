@@ -181,6 +181,8 @@ class TCNNModel(ClassifierModel[TCNNParams]):
     def __create_model(self) -> tw.keras.Model:
         model_tcnn = tw.keras.Sequential([
           tw.keras.layers.InputLayer(input_shape=(1, 150, 3)),
+          # --- Add small amount of noise ---
+          tw.keras.layers.GaussianNoise(self.hparams['noise_std']),
           # --- First Convolutional Block ---
           tw.keras.layers.Conv2D(self.hparams['n_filters'],
                                  kernel_size=(1, self.hparams['s_filters']),

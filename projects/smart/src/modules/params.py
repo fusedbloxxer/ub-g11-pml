@@ -44,6 +44,7 @@ class TCNNParams(HyperParams):
   m_init: tw.keras.initializers.VarianceScaling
   activ_fn: tw.keras.layers.Activation
   lr_update: Tuple[int, int, float]
+  noise_std: float
   n_filters: int
   s_filters: int
   dropout: float
