@@ -88,7 +88,7 @@ class Dataset(object):
         records = []
         for i, (data, label) in enumerate(zip(self.train_data, self.train_labels)):
             # Extract the column individually and append label and identifier
-            x, y, z = data[:, 0], data[:, 1], data[:, 1]
+            x, y, z = data[:, 0], data[:, 1], data[:, 2]
             target = ny.full_like(x, label, dtype=ny.int64)
             id = ny.full_like(x, i, dtype=ny.int64)
 
