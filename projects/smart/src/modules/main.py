@@ -8,13 +8,13 @@ import models
 import matplotlib.pyplot as pt
 import processing as pg
 from numpy.random import default_rng
+from tensorflow.keras.optimizers import Adam
 from torch.optim import lr_scheduler as sch_lr
 from sklearn.metrics import ConfusionMatrixDisplay
 from sklearn.model_selection import KFold
 from blocks import Swish
 from numpy.random import default_rng
 import params as params
-from tensorflow.keras.optimizers import Adam
 import tensorflow as tw
 import copy
 import torch
@@ -41,59 +41,64 @@ if 'GPU' not in available_devices:
   print('Warning: running on CPU only')
 
 # Load the data from disk
-dataset = pg.Dataset(DATASET_PATH)
+dataset = pg.load_dataset(DATASET_PATH)
+train_data, train_labels = dataset['train']
+test_data = dataset['test']
 
 # Compute sizes in order to search for potential missing values in each time series
-train_sizes = [sample.shape[0] for sample in dataset.train_data]
-test_sizes = [sample.shape[0] for sample in dataset.train_data]
+train_sizes = [sample.shape[0] for sample in train_data]
+test_sizes = [sample.shape[0] for sample in test_data]
 
 # Display missing value stats
-pt.figure()
+pt.figure(figsize=(15, 5))
 for i, (sizes, title) in enumerate([(train_sizes, 'train'), (test_sizes, 'test')]):
   pt.subplot(1, 2, i + 1)
-  pt.title(f'Missing values in {title.capitalize()}')
+  pt.title(f'Initial Values in {title.capitalize()}')
   pt.xlabel('Time Series Size')
   pt.ylabel('Frequency')
   pt.hist(sizes)
   pt.grid(True)
 
-# # Remove outliers
-# dataset.remove_outliers(by='class', factor=4.5)
+# Remove outliers by class & global from training data
+no_outliers_train_data, \
+no_outliers_train_labels = pg.remove_outliers(train_data,
+                                              train_labels, by='both', factor=1.5)
 
-# # Compute sizes in order to search for potential missing values in each time series
-# train_sizes = [sample.shape[0] for sample in dataset.train_data]
-# test_sizes = [sample.shape[0] for sample in dataset.train_data]
+# Remove only outlier globally from testing data as no labels are given for class strategy
+no_outliers_test_data = pg.remove_outliers(test_data, by='global', factor=1.5)
 
-# # Display missing value stats
-# pt.figure()
-# for i, (sizes, title) in enumerate([(train_sizes, 'train'), (test_sizes, 'test')]):
-#   pt.subplot(1, 2, i + 1)
-#   pt.title(f'Missing values in {title.capitalize()}')
-#   pt.xlabel('Time Series Size')
-#   pt.ylabel('Frequency')
-#   pt.hist(sizes)
-#   pt.grid(True)
-# pt.show()
+# Compute sizes in order to search for potential missing values in each time series
+train_sizes = [sample.shape[0] for sample in no_outliers_train_data]
+test_sizes = [sample.shape[0] for sample in no_outliers_test_data]
+
+# Display missing value stats
+pt.figure(figsize=(15, 5))
+for i, (sizes, title) in enumerate([(train_sizes, 'train'), (test_sizes, 'test')]):
+  pt.subplot(1, 2, i + 1)
+  pt.title(f'Missing Values in {title.capitalize()}')
+  pt.xlabel('Time Series Size')
+  pt.ylabel('Frequency')
+  pt.hist(sizes)
+  pt.grid(True)
 
 # Fill holes using interpolation
-dataset.fill_gaps(n_size=150, min_limit=None)
+no_gaps_train_data, \
+no_gaps_train_labels = pg.fill_gaps(no_outliers_train_data, no_outliers_train_labels, n_size=150, min_limit=50)
+no_gaps_test_data = pg.fill_gaps(no_outliers_test_data, n_size=150, min_limit=None)
 
 # Compute sizes in order to search for potential missing values in each time series
-train_sizes = [sample.shape[0] for sample in dataset.train_data]
-test_sizes = [sample.shape[0] for sample in dataset.test_data]
+train_sizes = [sample.shape[0] for sample in no_gaps_train_data]
+test_sizes = [sample.shape[0] for sample in no_gaps_test_data]
 
 # Display missing value stats
-pt.figure()
+pt.figure(figsize=(15, 5))
 for i, (sizes, title) in enumerate([(train_sizes, 'train'), (test_sizes, 'test')]):
   pt.subplot(1, 2, i + 1)
-  pt.title(f'Filled gaps in {title.capitalize()}')
+  pt.title(f'Filled-in Gaps {title.capitalize()}')
   pt.xlabel('Time Series Size')
   pt.ylabel('Frequency')
   pt.hist(sizes)
   pt.grid(True)
-
-# Perfrom data preprocessing before normalization
-dataset.preprocess(rounding=None)
 
 # Sample three recordings
 gen = default_rng(24)
@@ -114,26 +119,19 @@ strategies = (
 f = pt.figure(figsize=(15, 5))
 f.suptitle(f'User {i}')
 for i, (strategy, axis) in enumerate(strategies):
-  # Normalize copy to view different perspectives
-  dataset_copy = copy.deepcopy(dataset)
-  dataset_copy.normalize(strategy, axis)
+  # Normalize to view different perspectives
+  norm_train_data, \
+  norm_test_data = pg.normalize(no_gaps_train_data, no_gaps_test_data, strategy, axis)
 
   # Retrieve normalized samples
-  record_x = dataset_copy.train_data[sample_i][0]
+  record_x = norm_train_data[sample_i][0]
 
   # Display scaled vectors
   plot_n = f.add_subplot(2, len(strategies), i + 1, projection='3d')
   plot_n.plot(record_x[:, 0], record_x[:, 1], record_x[:, 2])
   plot_n.set_title(f'{strategy} {axis}')
   plot_n.view_init(elev=40, azim=30)
-  del dataset_copy
 pt.show()
-
-# Standardize the training & testing data
-dataset.normalize('standard', (0,))
-
-# Reshape to (n_samples, n_features) commonly used format
-dataset.reshape((-1, 450))
 
 # Model providers / factories
 model_svm_factory = lambda: models.SVMModel({
@@ -157,27 +155,28 @@ model_boosted_trees_factory = lambda: models.BoostedTreesModel({
 model_tcnn_factory = lambda: models.TCNNModel({
   'optim': lambda: Adam(learning_rate=2e-4, weight_decay=2e-4),
   'm_init': tw.keras.initializers.GlorotNormal(seed=24),
-  'activ_fn': tw.keras.layers.Activation('leaky_relu'),
+  'activ_fn': tw.keras.layers.Activation('swish'),
   'lr_update': (30, 10, 0.8),
   'n_filters': 128,
-  's_filters': 3,
+  's_filters': 5,
   'n_units': 1024,
-  'dropout': 0.35,
-  'n_epochs': 200,
+  'dropout': 0.3,
+  'n_epochs': 150,
   'n_batch': 32,
+  'noise_std': 5e-3,
 }, ROOT_PATH)
 
 model_attention_tcnn_factory = lambda: models.AttentionTCNNModel({
-  'sch_lr': lambda o, v: sch_lr.ReduceLROnPlateau(o, 'min', verbose=v, patience=10, cooldown=5),
-  'optim': lambda params: torch.optim.AdamW(params, lr=2e-4, weight_decay=6e-4),
+  'sch_lr': lambda o, v: sch_lr.StepLR(o, step_size=40, gamma=2e-1, verbose=v),
+  'optim': lambda params: torch.optim.AdamW(params, lr=2e-4, weight_decay=3e-4),
   'init_fn': lambda w: torch.nn.init.xavier_normal_(w),
   'activ_fn': Swish,
-  'bottleneck': 8,
-  'dropout': 0.2,
+  'bottleneck': 4,
+  'dropout': 0.3,
   's_filters': 3,
   'n_filters': 256,
   'n_epochs': 100,
-  'n_units': 1024,
+  'n_units': 512,
   'n_batch': 32,
   'norm': True,
   'bias': True,
@@ -185,7 +184,7 @@ model_attention_tcnn_factory = lambda: models.AttentionTCNNModel({
 
 def hybrid(cl_model_factory: typing.Callable[[], models.Model]):
   ae_model = models.AutoEncoderModel({
-    'sch_lr': lambda o, v: sch_lr.ReduceLROnPlateau(o, 'min', verbose=v, patience=10, cooldown=5),
+    'sch_lr': lambda o, v: sch_lr.ReduceLROnPlateau(o, 'min', verbose=v, patience=7, cooldown=2),
     'optim': lambda params: torch.optim.Adam(params, lr=1e-3),
     'init_fn': lambda w: torch.nn.init.xavier_normal_(w),
     'loss_fn': torch.nn.MSELoss(reduction='none'),
@@ -198,10 +197,10 @@ def hybrid(cl_model_factory: typing.Callable[[], models.Model]):
     'bias': True,
   }, device=torch.device('cuda'), verbose=True)
   return models.HybridAutoEncoderClassifier(ae_model, cl_model_factory())
-model_hybrid_factory = lambda: hybrid(model_knn_factory)
+model_hybrid_factory = lambda: hybrid(model_svm_factory)
 
 # Setup current model to be used
-model_factory = model_hybrid_factory
+model_factory = model_svm_factory
 
 # Display periodic plots across each fold
 pt.figure()
@@ -213,22 +212,32 @@ tparams: params.TrainParams = {
 
 # Train and validate using crossvalidation technique
 trn_accy, val_accy = [], []
-for i, (fold_train, fold_valid) in enumerate(KFold(shuffle=True, n_splits=tparams['n_folds']).split(dataset.train_data, dataset.train_labels)):
+train_dummy = ny.empty((9000, 450))
+for i, (fold_train, fold_valid) in enumerate(KFold(shuffle=True, n_splits=tparams['n_folds']).split(train_dummy)):
   # Indicate current iteration
   print(f"{tparams['n_folds']}-Fold: {i + 1}")
 
   # Create new model with random weights
   model = model_factory()
 
-  # Gather points for each step
-  train_samples_fold = dataset.train_data[fold_train.tolist()]
-  valid_samples_fold = dataset.train_data[fold_valid.tolist()]
-  train_labels_fold = dataset.train_labels[fold_train.tolist()]
-  valid_labels_fold = dataset.train_labels[fold_valid.tolist()]
+  # Select subsets using the given indices
+  train_data_subset = [train_data[i] for i in fold_train]
+  valid_data_subset = [train_data[i] for i in fold_valid]
+  train_labels_subset = [train_labels[i] for i in fold_train]
+  valid_labels_subset = [train_labels[i] for i in fold_valid]
+
+  # Preprocess the data
+  train_data_subset,   \
+  train_labels_subset, \
+  valid_data_subset,   \
+  valid_labels_subset = pg.preprocess(train_data_subset,
+                                      train_labels_subset,
+                                      valid_data_subset,
+                                      valid_labels_subset)
 
   # Learn on training data and predict on valid set
-  history = model.fit(train_samples_fold, train_labels_fold, \
-                      valid_samples_fold, valid_labels_fold)
+  history = model.fit(train_data_subset, train_labels_subset, \
+                      valid_data_subset, valid_labels_subset)
 
   # Save max valid & train accy for the current fold
   val_accy.append(history.accuracy[1])
@@ -264,16 +273,31 @@ pt.show()
 model = model_factory()
 
 # Split data indices
-rnd_indices = gen.choice(len(dataset.train_data), size=len(dataset.train_data), replace=False)
+rnd_indices = default_rng(76).choice(len(train_data), size=len(train_data), replace=False)
 n_subset_valid = 2_000
-n_subset_train_i = dataset.train_data.shape[0] - n_subset_valid
+n_subset_train_i = len(train_data) - n_subset_valid
 n_subset_valid_i = n_subset_train_i
 
+# Get indices and extract the elements
+train_i = rnd_indices[:n_subset_train_i]
+valid_i = rnd_indices[n_subset_valid_i:]
+train_data_subset = [train_data[i] for i in train_i]
+valid_data_subset = [train_data[i] for i in valid_i]
+train_labels_subset = [train_labels[i] for i in train_i]
+valid_labels_subset = [train_labels[i] for i in valid_i]
+
+# Preprocess the data
+train_data_subset,   \
+train_labels_subset, \
+valid_data_subset,   \
+valid_labels_subset = pg.preprocess(train_data_subset, train_labels_subset, \
+                                    valid_data_subset, valid_labels_subset)
+
 # Fit model on all training data except last 2_000 entries
-model.fit(dataset.train_data[rnd_indices[:n_subset_train_i]], dataset.train_labels[rnd_indices[:n_subset_train_i]])
+model.fit(train_data_subset, train_labels_subset)
 
 # Predict on last 2_000 entries
-m_cnf = model.conf(dataset.train_data[rnd_indices[n_subset_valid_i:]], dataset.train_labels[rnd_indices[n_subset_valid_i:]])
+m_cnf = model.conf(valid_data_subset, valid_labels_subset)
 
 # Transform back to labels instead of probs
 f = pt.figure()
@@ -286,13 +310,26 @@ pt.show()
 model = model_factory()
 
 # Fit on the entire training to have more data for further predictions
-rnd_indices = gen.choice(len(dataset.train_data), size=len(dataset.train_data), replace=False)
-history = model.fit(dataset.train_data[rnd_indices], dataset.train_labels[rnd_indices])
+rnd_indices = default_rng(76).choice(len(train_data), size=len(train_data), replace=False)
+
+# Get indices and extract the elements
+test_data_subset = test_data
+train_data_subset = [train_data[i] for i in rnd_indices]
+train_labels_subset = [train_labels[i] for i in rnd_indices]
+
+# Preprocess the data
+train_data_subset,   \
+train_labels_subset, \
+test_data_subset = pg.preprocess(train_data_subset, train_labels_subset, \
+                                 test_data_subset)
+
+# Fit model on all training examples and predict on the test subset
+history = model.fit(train_data_subset, train_labels_subset)
 print(history.accuracy[0])
 history.show()
 
 # Predict unknown labels
-test_pred_labels = model.predict(dataset.test_data)
+test_pred_labels = model.predict(test_data_subset)
 
 # Create resulting test object
 test_ids = ps.Series([p.stem for p in sorted(DATASET_TEST_PATH.glob('*.csv'))], name='id')
@@ -303,4 +340,4 @@ test_results = ps.DataFrame({
 })
 
 # And store the results obtained by the model using that previously created test frame
-test_results.to_csv(SUBMISSIONS_PATH / 'test_labels_37.csv', mode='w', header=True, index=False)
+test_results.to_csv(SUBMISSIONS_PATH / 'test_labels_43.csv', mode='w', header=True, index=False)

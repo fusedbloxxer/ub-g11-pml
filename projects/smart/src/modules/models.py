@@ -12,11 +12,11 @@ from sklearn.metrics import confusion_matrix
 from sklearn.svm import SVC
 import sklearn as sn
 import numpy as ny
-from .processing import get_loader, get_loaders
-from .progress import HistoryProgress, NNHistoryProgress, TorchHistoryProgress, TrainValidHistoryProgress
-from .params import AutoEncoderParams, KNNParams, SVMParams, BoostedTreesParams
-from .params import TCNNParams, AttentionTCNNParams
-from .blocks import AutoEncoder, TemporalAttentionNN
+from processing import get_loader, get_loaders
+from progress import HistoryProgress, NNHistoryProgress, TorchHistoryProgress, TrainValidHistoryProgress
+from params import AutoEncoderParams, KNNParams, SVMParams, BoostedTreesParams
+from params import TCNNParams, AttentionTCNNParams
+from blocks import AutoEncoder, TemporalAttentionNN
 
 
 HP = TypeVar('HP', bound=Any)

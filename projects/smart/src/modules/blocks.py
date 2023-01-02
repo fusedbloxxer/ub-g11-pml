@@ -221,7 +221,7 @@ class TemporalAttentionNN(NNModule):
     super().__init__(init_fn=init_fn, device=device, verbose=verbose, bias=bias)
 
     # Internal params
-    self.n_fcn_hidden_layers = 3
+    self.n_fcn_hidden_layers = 2
     self.n_cnn_hidden_layers = 2
     self.inner_repeat = 2
     self.bias = bias
@@ -233,20 +233,21 @@ class TemporalAttentionNN(NNModule):
     self.layers_.add_module(name='stage_1', module=nn.Sequential(
       ResBlock2d(in_chan, n_filters, s_filters, activ_fn, norm,
                  1, bias, self.inner_repeat, dropout),
+      SelfAttentionBlock2d(n_filters, bottleneck, bias),
       ResBlock2d(n_filters, n_filters, s_filters, activ_fn, norm,
                  bottleneck, bias, self.inner_repeat, dropout),
+      nn.MaxPool2d((1, s_filters), (1, 2)),
     ))
 
     # --- Hidden Residual Blocks ---
     for i in range(self.n_cnn_hidden_layers):
       self.layers_.add_module(name=f'stage_{i + 2}', module=nn.Sequential(
-        nn.MaxPool2d((1, s_filters), (1, 2)),
         ResBlock2d(n_filters * 2 ** i, n_filters * 2 ** i, s_filters,
                    activ_fn, norm, bottleneck, bias, self.inner_repeat, dropout),
-        nn.MaxPool2d((1, s_filters), (1, 2)),
+        SelfAttentionBlock2d(n_filters * 2 ** i, bottleneck, bias),
         ResBlock2d(n_filters * 2 ** i, n_filters * 2 ** (i + 1), s_filters,
                    activ_fn, norm, bottleneck, bias, self.inner_repeat, dropout),
-        SelfAttentionBlock2d(n_filters * 2 ** (i + 1), bottleneck, bias),
+        nn.MaxPool2d((1, s_filters), (1, 2)),
       ))
 
     # --- Reshaping the features ---
@@ -401,7 +402,7 @@ class TemporalAttentionNN(NNModule):
 
       # Adjust LR after each pass
       if scheduler is not None:
-        scheduler.step(val_loss if val_loader else epoch_loss)
+        scheduler.step() # val_loss if val_loader else epoch_loss)
 
     # Return the history of the training and validation processes
     if val_loader is not None:
