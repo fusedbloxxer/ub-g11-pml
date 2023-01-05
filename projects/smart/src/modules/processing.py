@@ -7,6 +7,8 @@ import pandas as ps
 import numpy as ny
 from numpy.random import default_rng
 from torch.utils.data import DataLoader
+import mpl_toolkits as mts
+import matplotlib as mb
 import torch.utils.data as data
 import torch
 
@@ -15,31 +17,47 @@ def preprocess(train_data_subset: List[ny.ndarray],
                train_labels_subset: List[int],
                valid_data_subset: ny.ndarray,
                valid_labels_subset: Optional[List[int]] = None,
+               outliers: Optional[Tuple[str, float]] = None,
+               pos_embedding: bool = False,
+               norm: Optional[Tuple[str, Tuple[int, ...]]] = ('standard', (0,)),
+               gaps: Optional[Tuple[int, Optional[int]]] = (150, None),
                seed: int = 67) -> Tuple[ny.ndarray, ny.ndarray, ny.ndarray] \
                                 | Tuple[ny.ndarray, ny.ndarray, ny.ndarray, ny.ndarray]:
     """Preprocess the data"""
     if valid_labels_subset is not None:
         # 1. Remove outliers
-        # train_data_subset, \
-        # train_labels_subset = remove_outliers(train_data_subset, train_labels_subset,
-        #                                       by='global', factor=1.5)
-        # valid_data_subset, \
-        # valid_labels_subset = remove_outliers(valid_data_subset, valid_labels_subset,
-        #                                       by='global', factor=1.5)
+        if outliers is not None:
+            train_data_subset, \
+            train_labels_subset = remove_outliers(train_data_subset, train_labels_subset,
+                                                  by=outliers[0], factor=outliers[1])
+            valid_data_subset, \
+            valid_labels_subset = remove_outliers(valid_data_subset, valid_labels_subset,
+                                                  by=outliers[0], factor=outliers[1])
 
         # 2. Apply upper-bound, remove outliers, apply lower-bound, interpolate
         train_data_subset, \
-        train_labels_subset = fill_gaps(train_data_subset, train_labels_subset, n_size=150)
+        train_labels_subset = fill_gaps(train_data_subset, train_labels_subset,
+                                        n_size=gaps[0], min_limit=gaps[1])
         valid_data_subset, \
-        valid_labels_subset = fill_gaps(valid_data_subset, valid_labels_subset, n_size=150)
+        valid_labels_subset = fill_gaps(valid_data_subset, valid_labels_subset,
+                                        n_size=gaps[0])
 
-        # 3. Normalize the data
-        train_data_subset, \
-        valid_data_subset = normalize(train_data_subset,
-                                      valid_data_subset,
-                                      strategy='standard', axis=(0,))
+        # 3. Add positional encoding
+        if pos_embedding:
+            pos_encoding = ny.linspace(0, 150, 150) / 150. # [0 / 150, ..., 150 / 150]
+            pos_encoding = ny.repeat(ny.expand_dims(pos_encoding, axis=1), repeats=3, axis=1)
+            pos_encoding = ny.expand_dims(pos_encoding, axis=0).astype(ny.float32)
+            train_data_subset = train_data_subset + pos_encoding
+            valid_data_subset = valid_data_subset + pos_encoding
 
-        # 4. Flatten the dimensions
+        # 4. Normalize the data
+        if norm is not None:
+            train_data_subset, \
+            valid_data_subset = normalize(train_data_subset,
+                                          valid_data_subset,
+                                          strategy=norm[0], axis=norm[1])
+
+        # 5. Flatten the dimensions
         train_data_subset = train_data_subset.reshape((-1, 450))
         valid_data_subset = valid_data_subset.reshape((-1, 450))
 
@@ -54,25 +72,36 @@ def preprocess(train_data_subset: List[ny.ndarray],
                valid_data_subset, valid_labels_subset
     else:
         # 1. Remove outliers
-        # train_data_subset, \
-        # train_labels_subset = remove_outliers(train_data_subset,   \
-        #                                       train_labels_subset, \
-        #                                       by='global', factor=1.5)
-        # valid_data_subset = remove_outliers(valid_data_subset,
-        #                                     by='global', factor=1.5)
+        if outliers is not None:
+            train_data_subset, \
+            train_labels_subset = remove_outliers(train_data_subset, train_labels_subset,
+                                                  by=outliers[0], factor=outliers[1])
+            valid_data_subset = remove_outliers(valid_data_subset,
+                                                by=outliers[0], factor=outliers[1])
 
         # 2. Apply upper-bound, remove outliers, apply lower-bound, interpolate
         train_data_subset, \
-        train_labels_subset = fill_gaps(train_data_subset, train_labels_subset, n_size=150)
-        valid_data_subset = fill_gaps(valid_data_subset, n_size=150)
+        train_labels_subset = fill_gaps(train_data_subset, train_labels_subset,
+                                        n_size=gaps[0], min_limit=gaps[1])
+        valid_data_subset = fill_gaps(valid_data_subset,
+                                      n_size=gaps[0])
 
-        # 3. Normalize the data
-        train_data_subset, \
-        valid_data_subset = normalize(train_data_subset, \
-                                      valid_data_subset, \
-                                      strategy='standard', axis=(0,))
+        # 3. Add positional encoding
+        if pos_embedding:
+            pos_encoding = ny.linspace(0, 150, 150) / 150. # [0 / 150, ..., 150 / 150]
+            pos_encoding = ny.repeat(ny.expand_dims(pos_encoding, axis=1), repeats=3, axis=1)
+            pos_encoding = ny.expand_dims(pos_encoding, axis=0).astype(ny.float32)
+            train_data_subset = train_data_subset + pos_encoding
+            valid_data_subset = valid_data_subset + pos_encoding
 
-        # 4. Flatten the dimensions
+        # 4. Normalize the data
+        if norm is not None:
+            train_data_subset, \
+            valid_data_subset = normalize(train_data_subset, \
+                                          valid_data_subset, \
+                                          strategy=norm[0], axis=norm[1])
+
+        # 5. Flatten the dimensions
         train_data_subset = train_data_subset.reshape((-1, 450))
         valid_data_subset = valid_data_subset.reshape((-1, 450))
 
@@ -277,21 +306,35 @@ def split_train_data(train_data: ny.ndarray, train_labels: ny.ndarray,
 
 
 def fill_gaps(data: List[ny.ndarray], labels: Optional[List[int]] = None, n_size: int = 150,
-              min_limit: Optional[int] = None) -> Tuple[ny.ndarray, ny.ndarray] | ny.ndarray:
+              min_limit: Optional[int] = None, gaps: bool = False) -> ny.ndarray \
+                                                                    | Tuple[ny.ndarray, ny.ndarray] \
+                                                                    | Tuple[ny.ndarray, ny.ndarray, ny.ndarray]:
     """Fill in interpolated elements in-between existing ones."""
-    filled_data, deleted_i = fill_missing_values(data, n_size, min_limit)
+    if not gaps:
+        filled_data, deleted_i = fill_missing_values(data, n_size, min_limit, gaps)
+    else:
+        filled_data, deleted_i, gaps_i = fill_missing_values(data, n_size, min_limit, gaps)
 
     # If labels are given then delete marked elements
     if labels is not None:
         filled_labels = ny.array([l for i, l in enumerate(labels)
                                     if i not in deleted_i])
-        return filled_data, filled_labels
+        if not gaps:
+            return filled_data, filled_labels
+        else:
+            return filled_data, filled_labels, gaps_i
 
     # Otherwise return only the processed data
-    return filled_data
+    if not gaps:
+        return filled_data
+    else:
+        return filled_data, gaps_i
 
 
-def fill_missing_values(dataset: List[ny.ndarray], n_size: int, min_limit: Optional[int] = None) -> Tuple[ny.ndarray, List[int]]:
+def fill_missing_values(dataset: List[ny.ndarray], n_size: int,
+                        min_limit: Optional[int] = None,
+                        gaps: bool = False) -> Tuple[ny.ndarray, List[int]] \
+                                            |  Tuple[ny.ndarray, List[int], ny.ndarray]:
     """Receive a list of tensors of different sizes, fill in the missing values using
     a strategy (ex. ewm) then return a tensor of tensors of the same size.
     Args:
@@ -299,32 +342,46 @@ def fill_missing_values(dataset: List[ny.ndarray], n_size: int, min_limit: Optio
         in the dataset.
         min_limit: Represents a lower-limit threshold which is used to
         discard samples that have too many missing datapoints.
+        gaps: If true, return a list with the same shape as the filled-in
+        dataset with boolean arrays that indicate where the gaps have been filled.
     Returns:
         An array containing the dataset with the added/reduced values and
         an array containing the indices for the entries that were deleted.
     """
     dataset = copy.deepcopy(dataset)
+    dataset_gaps = []
 
     mark_for_deletion = []
     for i, _ in enumerate(dataset):
+        # Initially no gaps are filled yet
+        gaps_i = ny.full((n_size,), False)
+
+        # Adjust the size of the sequences or drop them
         if dataset[i].shape[0] == n_size:
+            dataset_gaps.append(gaps_i)
             continue
         elif min_limit is not None and dataset[i].shape[0] < min_limit:
+            # If min_limit is not satisfied remove the element and don't retain gaps
             mark_for_deletion.append(i)
         elif dataset[i].shape[0] < n_size:
-            dataset[i] = impute_missing_values(dataset[i], n_size)
+            dataset[i], gaps_i = impute_missing_values(dataset[i], n_size)
+            dataset_gaps.append(gaps_i)
         else:
             dataset[i] = dataset[i][:n_size]
+            dataset_gaps.append(gaps_i)
 
     # When an element is deleted from the list decr the i to accomodate
     # for the shifted values
     for s, i in enumerate(mark_for_deletion):
         del dataset[i - s]
 
+    if gaps:
+        return ny.array(dataset, dtype=ny.float32), mark_for_deletion, ny.array(dataset_gaps)
+
     return ny.array(dataset, dtype=ny.float32), mark_for_deletion
 
 
-def impute_missing_values(sample: ny.ndarray, n_size: int, seed: int = 87) -> ny.ndarray:
+def impute_missing_values(sample: ny.ndarray, n_size: int, seed: int = 6745) -> Tuple[ny.ndarray, ny.ndarray]:
     """Fill in the missing values (rows) by computing the ewm."""
     sample_new = ps.DataFrame(columns=range(sample.shape[1]),
                                 index=range(n_size),
@@ -338,6 +395,9 @@ def impute_missing_values(sample: ny.ndarray, n_size: int, seed: int = 87) -> ny
     # interpolated values to occurr.
     sample_new_i = ny.sort(gen.choice(n_size - 2, sample.shape[0] - 2, replace=False) + 1)
 
+    # Get a boolean array where True indicates that a gap is being filled-in.
+    gaps = ny.isin(ny.arange(n_size), ny.concatenate((sample_new_i, (0, 149))), invert=True)
+
     # Lock in the head and the tail
     sample_new.iloc[0], sample_new.iloc[-1] = sample[0], sample[-1]
 
@@ -346,7 +406,7 @@ def impute_missing_values(sample: ny.ndarray, n_size: int, seed: int = 87) -> ny
 
     # Use interpolation to fill gaps and copy values where impossible
     gaps_filled = sample_new.interpolate(axis='index').fillna(method='bfill')
-    return gaps_filled.to_numpy().astype(ny.float32)
+    return gaps_filled.to_numpy().astype(ny.float32), gaps
 
 
 def load_dataset(dataset_path: pb.Path) -> Dict[str, Tuple[List[ny.ndarray], List[int]] | List[ny.ndarray]]:
@@ -483,4 +543,34 @@ def get_loader(data: ny.ndarray, labels: ny.ndarray | None = None, shuffle: bool
     return DataLoader(dataset, batch_size=batch, shuffle=shuffle,
                       num_workers=workers, pin_memory=True,
                       prefetch_factor=prefetch)
+
+
+def plot_seq(sample: ny.ndarray, ax_3d: mts.mplot3d.Axes3D, lines: bool, points: bool):
+    x, y, z = ny.array(sample).T
+
+    if points:
+        ax_3d.scatter3D(x, y, z, marker='x', color='black')
+
+    if lines:
+        # Create custom colormap
+        start_seq_cl = 'red'
+        stop_seq_cl = 'blue'
+        grad_cmap = mb.colors.LinearSegmentedColormap.from_list('grad', (start_seq_cl, stop_seq_cl))
+        grad_coefs = ny.arange(0, 1, 1 / x.shape[0])
+        grad_colors = grad_cmap(grad_coefs)
+        seq_intervals = ny.stack((sample[:-1], sample[1:]), axis=1)
+
+        # Create and color the segments
+        grad_segs = mts.mplot3d.art3d.Line3DCollection(segments=seq_intervals, cmap=grad_cmap)
+        grad_segs.set_array(ny.linspace(0, 1, x.shape[0]))
+
+        # Plot the list of sequence segments
+        ax_3d.plot(x, y, z)
+        ax_3d.add_collection3d(grad_segs)
+
+    # Adjust perspective to view better the filled-in points
+    ax_3d.view_init(elev=45, azim=135, roll=0)
+    ax_3d.set_xlabel('x-axis')
+    ax_3d.set_ylabel('y-axis')
+    ax_3d.set_zlabel('z-axis')
 

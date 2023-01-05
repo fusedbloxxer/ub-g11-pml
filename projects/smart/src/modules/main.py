@@ -6,6 +6,7 @@ import pathlib as pb
 from typing import List
 import models
 import matplotlib.pyplot as pt
+import matplotlib as mb
 import processing as pg
 from numpy.random import default_rng
 from tensorflow.keras.optimizers import Adam
@@ -15,7 +16,7 @@ from sklearn.model_selection import KFold
 from blocks import Swish
 from numpy.random import default_rng
 import params as params
-import tensorflow as tw
+import mpl_toolkits as mts
 import copy
 import torch
 import typing
@@ -32,6 +33,8 @@ DATASET_TRAIN_LABELS_FILEPATH = pb.Path(path.join(DATASET_PATH, 'train_labels.cs
 # Use GPU if available
 so.environ['CUDA_VISIBLE_DEVICES'] = '0'
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+import tensorflow as tw
 
 # Show warning if running on CPU
 available_devices = list(map(lambda d: d.device_type, tw.config.list_physical_devices()))
@@ -62,7 +65,7 @@ for i, (sizes, title) in enumerate([(train_sizes, 'train'), (test_sizes, 'test')
 # Remove outliers by class & global from training data
 no_outliers_train_data, \
 no_outliers_train_labels = pg.remove_outliers(train_data,
-                                              train_labels, by='both', factor=1.5)
+                                              train_labels, by='global', factor=1.5)
 
 # Remove only outlier globally from testing data as no labels are given for class strategy
 no_outliers_test_data = pg.remove_outliers(test_data, by='global', factor=1.5)
@@ -100,9 +103,38 @@ for i, (sizes, title) in enumerate([(train_sizes, 'train'), (test_sizes, 'test')
   pt.hist(sizes)
   pt.grid(True)
 
+# Get smallest sequence from the data
+min_i = 0
+for i in range(len(train_data)):
+  if train_data[i].shape[0] < train_data[min_i].shape[0]:
+      min_i = i
+
+# Fill the gaps without removing outliers
+train_data_filled, \
+train_labels_filled, \
+train_data_gaps = pg.fill_gaps(train_data, train_labels, n_size=150, gaps=True)
+f = pt.figure()
+
+# Show sequence with gaps
+sample = train_data[min_i]
+x, y, z = ny.array(sample).T
+ax0_3d = f.add_subplot(1, 2, 1, projection='3d')
+pg.plot_seq(sample, ax0_3d, lines=True, points=False)
+ax0_3d.set_title(f'Training Sample With {150-train_data[min_i].shape[0]} Gaps')
+
+# Show filled-in sequence
+sample = train_data_filled[min_i]
+x, y, z = ny.array(sample).T
+ax1_3d = f.add_subplot(1, 2, 2, projection='3d')
+pg.plot_seq(sample, ax1_3d, True, False)
+pg.plot_seq(train_data_filled[min_i, train_data_gaps[min_i]], ax1_3d, lines=False, points=True)
+ax1_3d.set_title('Filled-in Training Sample')
+pt.show()
+
 # Sample three recordings
 gen = default_rng(24)
-sample_i = gen.choice(9000, size=1, replace=False)
+sample_i = 100
+user_label = train_labels[sample_i]
 
 # Try different normalization / feature scaling methods
 strategies = (
@@ -116,27 +148,31 @@ strategies = (
 )
 
 # Display a sample in both sensor space and normalized space
-f = pt.figure(figsize=(15, 5))
-f.suptitle(f'User {i}')
+f = pt.figure(figsize=(20, 7))
+f.suptitle(f'User {user_label}')
+f.tight_layout()
 for i, (strategy, axis) in enumerate(strategies):
   # Normalize to view different perspectives
   norm_train_data, \
   norm_test_data = pg.normalize(no_gaps_train_data, no_gaps_test_data, strategy, axis)
 
   # Retrieve normalized samples
-  record_x = norm_train_data[sample_i][0]
+  train_record = norm_train_data[sample_i]
 
   # Display scaled vectors
   plot_n = f.add_subplot(2, len(strategies), i + 1, projection='3d')
-  plot_n.plot(record_x[:, 0], record_x[:, 1], record_x[:, 2])
+  plot_n.plot3D(train_record[:, 0], train_record[:, 1], train_record[:, 2])
   plot_n.set_title(f'{strategy} {axis}')
-  plot_n.view_init(elev=40, azim=30)
+  plot_n.set_xlabel('x')
+  plot_n.set_ylabel('y')
+  plot_n.set_zlabel('z')
+  plot_n.view_init(elev=50, azim=45)
 pt.show()
 
 # Model providers / factories
 model_svm_factory = lambda: models.SVMModel({
   'C': 7,
-  'gamma': 0.01,
+  'gamma': 'auto',
   'kernel': 'rbf',
 }, verbose=False)
 
@@ -153,22 +189,22 @@ model_boosted_trees_factory = lambda: models.BoostedTreesModel({
 }, verbose = 1)
 
 model_tcnn_factory = lambda: models.TCNNModel({
-  'optim': lambda: Adam(learning_rate=2e-4, weight_decay=2e-4),
+  'optim': lambda: Adam(learning_rate=2e-4),
   'm_init': tw.keras.initializers.GlorotNormal(seed=24),
   'activ_fn': tw.keras.layers.Activation('swish'),
   'lr_update': (30, 10, 0.8),
-  'n_filters': 128,
-  's_filters': 5,
-  'n_units': 1024,
-  'dropout': 0.3,
-  'n_epochs': 150,
-  'n_batch': 32,
-  'noise_std': 5e-3,
+  'n_filters': 256,
+  's_filters': 3,
+  'n_units': 2048,
+  'dropout': 0.4,
+  'n_epochs': 75,
+  'n_batch': 48,
+  'noise_std': 0.0,
 }, ROOT_PATH)
 
 model_attention_tcnn_factory = lambda: models.AttentionTCNNModel({
   'sch_lr': lambda o, v: sch_lr.StepLR(o, step_size=40, gamma=2e-1, verbose=v),
-  'optim': lambda params: torch.optim.AdamW(params, lr=2e-4, weight_decay=3e-4),
+  'optim': lambda params: torch.optim.Adam(params, lr=2e-4, weight_decay=3e-4),
   'init_fn': lambda w: torch.nn.init.xavier_normal_(w),
   'activ_fn': Swish,
   'bottleneck': 4,
@@ -187,12 +223,12 @@ def hybrid(cl_model_factory: typing.Callable[[], models.Model]):
     'sch_lr': lambda o, v: sch_lr.ReduceLROnPlateau(o, 'min', verbose=v, patience=7, cooldown=2),
     'optim': lambda params: torch.optim.Adam(params, lr=1e-3),
     'init_fn': lambda w: torch.nn.init.xavier_normal_(w),
-    'loss_fn': torch.nn.MSELoss(reduction='none'),
-    'activ_fn': torch.nn.LeakyReLU,
-    'embedding_features': 128,
-    'n_filters': 16,
-    'dropout': 0.0,
-    'n_epochs': 25,
+    'loss_fn': torch.nn.L1Loss(reduction='none'),
+    'activ_fn': Swish,
+    'embedding_features': 1024,
+    'n_filters': 32,
+    'dropout': 0.1,
+    'n_epochs': 50,
     'n_batch': 32,
     'bias': True,
   }, device=torch.device('cuda'), verbose=True)
@@ -200,7 +236,7 @@ def hybrid(cl_model_factory: typing.Callable[[], models.Model]):
 model_hybrid_factory = lambda: hybrid(model_svm_factory)
 
 # Setup current model to be used
-model_factory = model_svm_factory
+model_factory = model_tcnn_factory
 
 # Display periodic plots across each fold
 pt.figure()
@@ -213,7 +249,7 @@ tparams: params.TrainParams = {
 # Train and validate using crossvalidation technique
 trn_accy, val_accy = [], []
 train_dummy = ny.empty((9000, 450))
-for i, (fold_train, fold_valid) in enumerate(KFold(shuffle=True, n_splits=tparams['n_folds']).split(train_dummy)):
+for i, (fold_train, fold_valid) in enumerate(KFold(shuffle=True, n_splits=tparams['n_folds'], random_state=24).split(train_dummy)):
   # Indicate current iteration
   print(f"{tparams['n_folds']}-Fold: {i + 1}")
 
@@ -233,7 +269,9 @@ for i, (fold_train, fold_valid) in enumerate(KFold(shuffle=True, n_splits=tparam
   valid_labels_subset = pg.preprocess(train_data_subset,
                                       train_labels_subset,
                                       valid_data_subset,
-                                      valid_labels_subset)
+                                      valid_labels_subset,
+                                      outliers=None,
+                                      pos_embedding=False)
 
   # Learn on training data and predict on valid set
   history = model.fit(train_data_subset, train_labels_subset, \
@@ -273,14 +311,15 @@ pt.show()
 model = model_factory()
 
 # Split data indices
-rnd_indices = default_rng(76).choice(len(train_data), size=len(train_data), replace=False)
+# indices = default_rng(76).choice(len(train_data), size=len(train_data), replace=False)
+indices = ny.arange(len(train_data))
 n_subset_valid = 2_000
 n_subset_train_i = len(train_data) - n_subset_valid
 n_subset_valid_i = n_subset_train_i
 
 # Get indices and extract the elements
-train_i = rnd_indices[:n_subset_train_i]
-valid_i = rnd_indices[n_subset_valid_i:]
+train_i = indices[:n_subset_train_i]
+valid_i = indices[n_subset_valid_i:]
 train_data_subset = [train_data[i] for i in train_i]
 valid_data_subset = [train_data[i] for i in valid_i]
 train_labels_subset = [train_labels[i] for i in train_i]
@@ -340,4 +379,4 @@ test_results = ps.DataFrame({
 })
 
 # And store the results obtained by the model using that previously created test frame
-test_results.to_csv(SUBMISSIONS_PATH / 'test_labels_43.csv', mode='w', header=True, index=False)
+test_results.to_csv(SUBMISSIONS_PATH / 'test_labels_44.csv', mode='w', header=True, index=False)

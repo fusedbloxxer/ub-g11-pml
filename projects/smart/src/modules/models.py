@@ -280,7 +280,7 @@ class TCNNModel(ClassifierModel[TCNNParams]):
 
     def gpu_utiliz_callback(self) -> tw.keras.callbacks.Callback:
         """Watch out for GPU memory / utilization constraints."""
-        return GpuStatsLogger(['/gpu:0'], memory_utilization=True, gpu_utilization=True)
+        return tw.keras.callbacks.LambdaCallback() # GpuStatsLogger(['/gpu:0'], memory_utilization=True, gpu_utilization=True)
 
     def lr_updater_callback(self) -> tw.keras.callbacks.Callback:
         # Update the learning rate on each epoch using custom scheduling

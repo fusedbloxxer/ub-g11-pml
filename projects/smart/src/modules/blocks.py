@@ -210,7 +210,7 @@ class TemporalAttentionNN(NNModule):
   """Exploit the temporal/sequential nature of the input by using convolutions
   along this dimension and treat the spatial coordinates of the samples as
   channels in order to get better latent representations for each temporal point.
-  Apply self-attention to keep global information along every step and use
+  Apply self-attention to keep global information along every step and use 
   residual connections to improve the gradient flow during model optimization."""
   def __init__(self, in_chan: int, out_chan: int,
                s_filters: int = 3, n_filters: int = 128, n_units: int = 1024,
@@ -221,9 +221,9 @@ class TemporalAttentionNN(NNModule):
     super().__init__(init_fn=init_fn, device=device, verbose=verbose, bias=bias)
 
     # Internal params
-    self.n_fcn_hidden_layers = 2
     self.n_cnn_hidden_layers = 2
-    self.inner_repeat = 2
+    self.n_fcn_hidden_layers = 2
+    self.inner_repeat = 1
     self.bias = bias
 
     # --- Input Layer ---
@@ -233,21 +233,21 @@ class TemporalAttentionNN(NNModule):
     self.layers_.add_module(name='stage_1', module=nn.Sequential(
       ResBlock2d(in_chan, n_filters, s_filters, activ_fn, norm,
                  1, bias, self.inner_repeat, dropout),
-      SelfAttentionBlock2d(n_filters, bottleneck, bias),
       ResBlock2d(n_filters, n_filters, s_filters, activ_fn, norm,
                  bottleneck, bias, self.inner_repeat, dropout),
-      nn.MaxPool2d((1, s_filters), (1, 2)),
     ))
 
     # --- Hidden Residual Blocks ---
     for i in range(self.n_cnn_hidden_layers):
       self.layers_.add_module(name=f'stage_{i + 2}', module=nn.Sequential(
+        SelfAttentionBlock2d(n_filters * 2 ** i, bottleneck, bias),
+        nn.Dropout2d(p=dropout / 3),
         ResBlock2d(n_filters * 2 ** i, n_filters * 2 ** i, s_filters,
                    activ_fn, norm, bottleneck, bias, self.inner_repeat, dropout),
         SelfAttentionBlock2d(n_filters * 2 ** i, bottleneck, bias),
+        nn.Dropout2d(p=dropout / 3),
         ResBlock2d(n_filters * 2 ** i, n_filters * 2 ** (i + 1), s_filters,
                    activ_fn, norm, bottleneck, bias, self.inner_repeat, dropout),
-        nn.MaxPool2d((1, s_filters), (1, 2)),
       ))
 
     # --- Reshaping the features ---
@@ -470,6 +470,7 @@ class CompressBlock(nn.Module):
       nn.Conv2d(out_chan, out_chan, (1, 3), stride=(1, 2), padding=(0, 1), bias=bias),
       nn.BatchNorm2d(out_chan),
       activ_fn,
+      nn.Dropout2d(p=dropout),
     )
 
   def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -481,7 +482,7 @@ class CompressBlock(nn.Module):
     return x
 
 
-class DecompressBlock(nn.Module):
+class  DecompressBlock(nn.Module):
   """Decompress the data by unpooling along the temporal axis using transposed
   convolutions and add the necessary padding to obtain the original size."""
   def __init__(self, in_chan: int, out_chan: int, activ_fn: nn.Module,
@@ -500,6 +501,7 @@ class DecompressBlock(nn.Module):
                          output_padding=(0, pad_side), bias=bias),
       nn.BatchNorm2d(in_chan),
       unpool_activ_fn,
+      nn.Dropout2d(p=dropout),
     )
     self.conv = nn.Conv2d(in_chan, out_chan, (1, kernel), 1, padding='same', bias=bias)
     self.bn = nn.BatchNorm2d(out_chan) if norm else nn.Identity()
