@@ -104,9 +104,9 @@ class FeatureExtractor(abc.ABC):
     self._min_max = min_max
 
   @abc.abstractmethod
-  def fit_transform(self, data: ny.ndarray, labels: ny.ndarray) -> None:
+  def fit_transform(self, data: ny.ndarray) -> None:
     """Build a representation on the given data, and extract features based on it.
-    Expects an array of size (N, C, H, W) of unprocessed images and (N,) labels."""
+    Expects an array of size (N, C, H, W) of unprocessed images."""
     raise NotImplementedError()
 
   @abc.abstractmethod
@@ -142,7 +142,7 @@ class ColorHistFeatureExtractor(FeatureExtractor):
     self._range = range
     self._density = density
 
-  def fit_transform(self, data: ny.ndarray, labels: ny.ndarray) -> None:
+  def fit_transform(self, _: ny.ndarray) -> None:
     """Dummy method. Does not need to build a representation, instances are enough."""
     return None
 
@@ -209,7 +209,7 @@ class BOVWFeatureExtractor(FeatureExtractor):
                                                          n_init='auto',
                                                          compute_labels=False)
 
-  def fit_transform(self, data: ny.ndarray, labels: ny.ndarray) -> None:
+  def fit_transform(self, data: ny.ndarray) -> None:
     # Transform all images to a new representation (N * D, E)
     descriptors: typing.List[ny.ndarray] = []
 
@@ -258,7 +258,7 @@ class BOVWFeatureExtractor(FeatureExtractor):
     cluster_memberships = ny.array(cluster_memberships)
 
     # Compute the bovw histograms
-    hist_count: ny.ndarray = ny.apply_along_axis(ny.bincount, axis=1, arr=ny.array(cluster_memberships), minlength=256)
+    hist_count: ny.ndarray = ny.apply_along_axis(ny.bincount, axis=1, arr=ny.array(cluster_memberships), minlength=self._n_features)
 
     # Optionally normalize the histogram
     if self._norm:

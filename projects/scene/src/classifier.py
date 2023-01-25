@@ -1,15 +1,19 @@
-from sklearn.cluster import DBSCAN, AffinityPropagation
+from sklearn.cluster import DBSCAN, AffinityPropagation, KMeans
+import sklearn.metrics as metrics
+import sklearn.cluster as cluster
 from torch.utils.data import Dataset, DataLoader, TensorDataset
 import torchvision as TV
 import torch.utils.data
 import torch.nn as nn
 import torch
 import numpy as ny
+from scipy.optimize import linear_sum_assignment
+import scipy as sy
 import typing
 import abc
 
 
-from feature_extraction import FeatureExtractor
+from feature_extraction import FeatureExtractor, ColorHistFeatureExtractor
 from data import SceneDataset
 
 
@@ -25,20 +29,98 @@ class Classifier(abc.ABC):
 
   @abc.abstractmethod
   def predict(self, data: ny.ndarray) -> ny.ndarray:
-    """Expect an array of unprocessed image of size (N, C, H, W) and predict
+    """Expect an array of unprocessed images of size (N, C, H, W) and predict
     labels, outputting (N,) elements."""
     raise NotImplementedError()
 
 
-class UnsupervisedClassifier(Classifier):
-  def __init__(self) -> None:
+class UnsupervisedClassifier(abc.ABC):
+  def __init__(self,
+               model: cluster.AffinityPropagation | cluster.DBSCAN,
+               f_extractor: FeatureExtractor = ColorHistFeatureExtractor(),
+               silhouette_dist: str = 'euclidian',
+               verbose: bool = True) -> None:
     super().__init__()
 
+    # Internal params
+    self._f_extractor = f_extractor
+    self._silhouette_dist = silhouette_dist
+    self._model = model
+    self.verbose = verbose
+
+  def evaluate(self, data: ny.ndarray, labels: ny.ndarray) -> ny.ndarray:
+    """Expect an array of unprocessed images of size (N, C, H, W) and infer
+    the best cluster assignments to match the given labels."""
+    return self._clusters_to_labels(labels, self.predict(data))
+
+  def predict(self, data: ny.ndarray) -> ny.ndarray:
+    """Expect an array of unprocessed images of size (N, C, H, W) and infer
+    the possible cluster assignments."""
+    data_features = self._f_extractor.transform(data)
+
+    # Predict the clusters using the obtained representation
+    data_clusters = self._predict_clusters(data_features)
+
+    # Return the cluster assignments for each data_sample
+    return data_clusters
+
+  def score(self, data: ny.ndarray) -> float:
+    """Expect an array of unprocessed images of size (N, C, H, W) and estimate
+    a score on the unseen data."""
+    data_features = self._f_extractor.transform(data)
+
+    # Predict the clusters using the obtained representation
+    data_clusters = self._predict_clusters(data_features)
+
+    # Compute an estimated score
+    return metrics.silhouette_score(data_features, data_clusters, metric=self._silhouette_dist)
+
+  def fit(self, data: ny.ndarray) -> None:
+    """Build a representation on the given data, and extract features based on it.
+    Expects an array of size (N, C, H, W) of unprocessed images."""
+    # Train the feature extractor to build a better representation over the raw data
+    self._f_extractor.fit_transform(data)
+
+    # Obtain the new representation
+    data_features = self._f_extractor.transform(data)
+
+    # Cluster over the computed features
+    self._model.fit(data_features)
+
   @abc.abstractmethod
-  def predict_clusters(self, data: ny.ndarray) -> ny.ndarray:
-    """Expect an array of unprocessed image of size (N, C, H, W) and predict
-    the cluster indices, outputting (N,) elements."""
+  def _predict_clusters(self, data_features: ny.ndarray) -> ny.ndarray:
+    """Given an array of preprocessed features (N, F) apply clustering and
+    predict the associated clusters."""
     raise NotImplementedError()
+
+  def _clusters_to_labels(self, labels: ny.ndarray, data_clusters: ny.ndarray) -> ny.ndarray:
+    """Having an array of size (N,) of cluster assignments, reassign them
+    to labels (N,) in order to maximize the metric."""
+    m_conf: ny.ndarray = metrics.confusion_matrix(labels, data_clusters)
+
+    # Find the pairs for the optimum cost
+    r_i, c_i = linear_sum_assignment(m_conf, maximize = True)
+
+    # Reassign the clusters to the corresponding labels
+    cluster_to_label = {x_from: x_to for x_from, x_to in zip(c_i, r_i)}
+    assignments = ny.vectorize(lambda x: cluster_to_label[x])(data_clusters)
+    return assignments
+
+
+class AffinityPropagationClassifier(UnsupervisedClassifier):
+  def __init__(self,
+               f_extractor: FeatureExtractor = ColorHistFeatureExtractor(),
+               silhouette_dist: str = 'euclidian',
+               verbose: bool = True,
+               **kwargs) -> None:
+    # Internal params
+    model = KMeans(**kwargs)
+
+    # Go to parent and resolve
+    super().__init__(model, f_extractor, silhouette_dist, verbose)
+
+  def _predict_clusters(self, data: ny.ndarray) -> ny.ndarray:
+    return self._model.predict(data)
 
 
 class TransferLearningClassifier(FeatureExtractor, Classifier):
@@ -116,9 +198,6 @@ class TransferLearningClassifier(FeatureExtractor, Classifier):
     model = model.eval()
     model.requires_grad_(False)
 
-  def fit_transform(self, data: ny.ndarray, labels: ny.ndarray) -> None:
-    return self.fit(data, labels)
-
   def predict(self, data: ny.ndarray) -> ny.ndarray:
     # Use mini-batch loading for the input data that has no labels
     data_no_labels = TensorDataset(torch.tensor(data))
@@ -143,6 +222,10 @@ class TransferLearningClassifier(FeatureExtractor, Classifier):
 
     # Concatenate and return results
     return ny.array(m_pred)
+
+  def fit_transform(self, _: ny.ndarray) -> None:
+    """Dummy method. Does not need to build another representation, instances are enough."""
+    return None
 
   def transform(self, data: ny.ndarray) -> ny.ndarray:
     # Use mini-batch loading for the input data that has no labels
