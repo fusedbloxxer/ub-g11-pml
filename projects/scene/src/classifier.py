@@ -30,6 +30,17 @@ class Classifier(abc.ABC):
     raise NotImplementedError()
 
 
+class UnsupervisedClassifier(Classifier):
+  def __init__(self) -> None:
+    super().__init__()
+
+  @abc.abstractmethod
+  def predict_clusters(self, data: ny.ndarray) -> ny.ndarray:
+    """Expect an array of unprocessed image of size (N, C, H, W) and predict
+    the cluster indices, outputting (N,) elements."""
+    raise NotImplementedError()
+
+
 class TransferLearningClassifier(FeatureExtractor, Classifier):
   def __init__(self,
                n_classes: int,
@@ -105,6 +116,9 @@ class TransferLearningClassifier(FeatureExtractor, Classifier):
     model = model.eval()
     model.requires_grad_(False)
 
+  def fit_transform(self, data: ny.ndarray, labels: ny.ndarray) -> None:
+    return self.fit(data, labels)
+
   def predict(self, data: ny.ndarray) -> ny.ndarray:
     # Use mini-batch loading for the input data that has no labels
     data_no_labels = TensorDataset(torch.tensor(data))
@@ -130,7 +144,7 @@ class TransferLearningClassifier(FeatureExtractor, Classifier):
     # Concatenate and return results
     return ny.array(m_pred)
 
-  def features(self, data: ny.ndarray) -> ny.ndarray:
+  def transform(self, data: ny.ndarray) -> ny.ndarray:
     # Use mini-batch loading for the input data that has no labels
     data_no_labels = TensorDataset(torch.tensor(data))
     data_fetcher: DataLoader = DataLoader(data_no_labels,
@@ -157,7 +171,7 @@ class TransferLearningClassifier(FeatureExtractor, Classifier):
     # Concatenate and return results
     return ny.concatenate(int_activs, axis=0)
 
-  def image_features(self, image: ny.ndarray) -> ny.ndarray:
+  def transform_image(self, image: ny.ndarray) -> ny.ndarray:
     # Prepare the input data
     image: torch.Tensor = self.preprocess(image)
 

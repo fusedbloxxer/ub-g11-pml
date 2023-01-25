@@ -96,7 +96,7 @@ class HOGFeatureTransformer(FeatureTransformer):
 class FeatureExtractor(abc.ABC):
   def __init__(self,
                grayscale: bool = False,
-               min_max: bool = True):
+               min_max: bool = True) -> None:
     super().__init__()
 
     # Configure common image representation parameters
@@ -104,19 +104,19 @@ class FeatureExtractor(abc.ABC):
     self._min_max = min_max
 
   @abc.abstractmethod
-  def fit(self, data: ny.ndarray, labels: ny.ndarray) -> None:
+  def fit_transform(self, data: ny.ndarray, labels: ny.ndarray) -> None:
     """Build a representation on the given data, and extract features based on it.
     Expects an array of size (N, C, H, W) of unprocessed images and (N,) labels."""
     raise NotImplementedError()
 
   @abc.abstractmethod
-  def features(self, data: ny.ndarray) -> ny.ndarray:
+  def transform(self, data: ny.ndarray) -> ny.ndarray:
     """Receive an array of raw unprocessed images (N, C, H, W) and extract features,
     outputting an array of size (N, F)."""
     raise NotImplementedError()
 
   @abc.abstractmethod
-  def image_features(self, image: ny.ndarray) -> ny.ndarray:
+  def transform_image(self, image: ny.ndarray) -> ny.ndarray:
     """Receive an unprocessed image of size (C, H, W) and extract features,
     outputiing an array of size (F,)"""
     raise NotImplementedError()
@@ -142,22 +142,22 @@ class ColorHistFeatureExtractor(FeatureExtractor):
     self._range = range
     self._density = density
 
-  def fit(self, data: ny.ndarray, labels: ny.ndarray) -> None:
+  def fit_transform(self, data: ny.ndarray, labels: ny.ndarray) -> None:
     """Dummy method. Does not need to build a representation, instances are enough."""
     return None
 
-  def features(self, data: ny.ndarray) -> ny.ndarray:
+  def transform(self, data: ny.ndarray) -> ny.ndarray:
     # Obtain the features based on the color histograms
     features = []
 
     # Iterative processsing over each image
     for image in data:
-      features.append(self.image_features(image))
+      features.append(self.transform_image(image))
 
     # Bundle all features
     return ny.stack(features, axis=0)
 
-  def image_features(self, image: ny.ndarray) -> ny.ndarray:
+  def transform_image(self, image: ny.ndarray) -> ny.ndarray:
     # Preprocess the current image
     image = self.preprocess(image[None, ...]).squeeze(0)
 
@@ -209,7 +209,7 @@ class BOVWFeatureExtractor(FeatureExtractor):
                                                          n_init='auto',
                                                          compute_labels=False)
 
-  def fit(self, data: ny.ndarray, labels: ny.ndarray) -> None:
+  def fit_transform(self, data: ny.ndarray, labels: ny.ndarray) -> None:
     # Transform all images to a new representation (N * D, E)
     descriptors: typing.List[ny.ndarray] = []
 
@@ -230,7 +230,7 @@ class BOVWFeatureExtractor(FeatureExtractor):
     # Retrieve the centroids and use them as the base vocabulary
     self.bovw_vocab_: ny.ndarray = self._cluser_algo.cluster_centers_
 
-  def features(self, data: ny.ndarray) -> ny.ndarray:
+  def transform(self, data: ny.ndarray) -> ny.ndarray:
     # Compute the image descriptors for each input: (N * D, E)
     descriptors: typing.List[ny.ndarray] = []
     same_size = None
@@ -266,7 +266,7 @@ class BOVWFeatureExtractor(FeatureExtractor):
     else:
       return hist_count
 
-  def image_features(self, image: ny.ndarray) -> ny.ndarray:
+  def transform_image(self, image: ny.ndarray) -> ny.ndarray:
     # Describe the image using the learnt clusters from fit function
     image_descriptors: ny.ndarray = self._transformer.transform(image)
     cluster_centers: ny.ndarray = self._cluser_algo.predict(image_descriptors)
